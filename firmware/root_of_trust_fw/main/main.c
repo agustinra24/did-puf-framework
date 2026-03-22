@@ -16,6 +16,10 @@
 #include "nvs.h"
 #include "driver/uart.h"
 #include "mbedtls/sha512.h"
+#include "api_secure_storage.h"
+#include "base64.h"
+#include "http_transactions.h"
+#include "cJSON.h"
 
 static const char *TAG = "RoT";
 #define NVS_NAMESPACE      "rot_config"
@@ -30,6 +34,7 @@ static const char *TAG = "RoT";
 #define SHA512_LEN         64
 #define DEVICE_ID_HEX_LEN 16
 #define PUF_MAX_LEN        512
+#define NVS_KEY_ENROLLED   "enrolled"
 
 typedef struct {
     char server_url[CFG_VALUE_MAX_LEN];
@@ -44,6 +49,8 @@ static rot_config_t g_config = {0};
 static char g_device_id[DEVICE_ID_HEX_LEN + 1] = {0};
 static uint8_t g_puf_hash[SHA512_LEN] = {0};
 static bool g_puf_valid = false;
+static uint8_t g_puf_raw[PUF_MAX_LEN] = {0};
+static size_t  g_puf_raw_len = 0;
 static EventGroupHandle_t s_wifi_event_group = NULL;
 static int s_wifi_retry_count = 0;
 
@@ -92,6 +99,8 @@ static bool load_puf_from_nvs(void) {
     nvs_close(h);
     if (err != ESP_OK || len == 0) return false;
     ESP_LOGI(TAG, "PUF Response loaded from NVS (%d bytes)", (int)len);
+    memcpy(g_puf_raw, puf, len);
+    g_puf_raw_len = len;
     derive_identity(puf, len);
     return true;
 }
@@ -172,6 +181,8 @@ static esp_err_t config_process_line(const char *line) {
                 nvs_commit(h);
                 nvs_close(h);
             }
+            memcpy(g_puf_raw, puf, puf_len);
+            g_puf_raw_len = puf_len;
             derive_identity(puf, puf_len);
             ESP_LOGI(TAG, "PUF Response stored (%d bytes)", puf_len);
         }
@@ -276,19 +287,113 @@ static void build_url(char *buf, size_t sz) {
     else snprintf(buf, sz, "%s%s", g_config.server_url, g_config.endpoint);
 }
 
-static void heartbeat_task(void *pv) {
-    while (true) {
-        char url[512]; build_url(url, sizeof(url));
-        esp_http_client_config_t hc = {.url=url, .method=HTTP_METHOD_GET, .timeout_ms=10000};
-        esp_http_client_handle_t c = esp_http_client_init(&hc);
-        if (c) {
-            esp_err_t err = esp_http_client_perform(c);
-            if (err == ESP_OK) {
-                int st = esp_http_client_get_status_code(c);
-                printf("HTTP %d — Heartbeat from %s\n", st, g_device_id);
-            } else printf("HTTP ERR — %s\n", esp_err_to_name(err));
-            esp_http_client_cleanup(c);
+static bool is_enrolled(void) {
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t val = 0;
+    esp_err_t err = nvs_get_u8(h, NVS_KEY_ENROLLED, &val);
+    nvs_close(h);
+    return (err == ESP_OK && val == 1);
+}
+
+static esp_err_t execute_step0(void) {
+    /* Base64 encode MAC and PUF hash for JSON payload */
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char *mac_b64 = NULL, *puf_b64 = NULL;
+    base64_encode_alloc(mac, 6, &mac_b64);
+    base64_encode_alloc(g_puf_hash, SHA512_LEN, &puf_b64);
+    if (!mac_b64 || !puf_b64) {
+        free(mac_b64); free(puf_b64);
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Build Step 0 JSON request */
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "Step", 0);
+    cJSON_AddStringToObject(root, "Device_Name", g_device_id);
+    cJSON_AddStringToObject(root, "Mac_Address", mac_b64);
+    cJSON_AddStringToObject(root, "PUF_Hash", puf_b64);
+    char *json_str = cJSON_PrintUnformatted(root);
+
+    /* Build enrollment URL from server config */
+    char enroll_url[512];
+    snprintf(enroll_url, sizeof(enroll_url), "%s:%s/api/v1/enroll",
+             g_config.server_url, g_config.server_port);
+    ESP_LOGI(TAG, "Step 0 enrollment -> %s", enroll_url);
+
+    /* POST enrollment request */
+    char *resp = NULL;
+    size_t resp_len = 0;
+    esp_err_t err = http_post_and_get_response(enroll_url, json_str, &resp, &resp_len);
+
+    if (err == ESP_OK && resp) {
+        cJSON *rj = cJSON_Parse(resp);
+        cJSON *pk_field = rj ? cJSON_GetObjectItem(rj, "kyber_pk") : NULL;
+        if (pk_field && pk_field->valuestring) {
+            uint8_t *pk = NULL;
+            size_t pk_len = 0;
+            base64_decode_alloc(pk_field->valuestring, &pk, &pk_len);
+            if (pk && pk_len > 0) {
+                /* Store Kyber pk encrypted in Sec_Store partition */
+                uint8_t aes_key[AES_256];
+                struct puf_object puf_obj = {0};
+                derive_key_from_puf(aes_key, &puf_obj, g_puf_raw, g_puf_raw_len);
+                struct aes_256_obj aes;
+                create_aes_256_obj(&aes, aes_key);
+                write_secure_storage_region(pk, pk_len, "KyberPK", &aes);
+                memset(aes_key, 0, sizeof(aes_key));
+                free(pk);
+
+                /* Mark device as enrolled */
+                nvs_handle_t h;
+                if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+                    nvs_set_u8(h, NVS_KEY_ENROLLED, 1);
+                    nvs_commit(h);
+                    nvs_close(h);
+                }
+                ESP_LOGI(TAG, "Step 0 complete. Kyber pk stored (%d bytes)", (int)pk_len);
+            } else {
+                ESP_LOGE(TAG, "Failed to decode Kyber pk from server response");
+                err = ESP_FAIL;
+            }
+        } else {
+            ESP_LOGE(TAG, "Server response missing kyber_pk field");
+            err = ESP_FAIL;
         }
+        cJSON_Delete(rj);
+        free(resp);
+    } else if (err == ESP_OK) {
+        ESP_LOGE(TAG, "Empty response from enrollment server");
+        err = ESP_FAIL;
+    }
+
+    cJSON_Delete(root);
+    free(json_str);
+    free(mac_b64);
+    free(puf_b64);
+
+    /* Clear raw PUF from memory after enrollment */
+    memset(g_puf_raw, 0, sizeof(g_puf_raw));
+    g_puf_raw_len = 0;
+
+    return err;
+}
+
+static void heartbeat_task(void *pv) {
+    char json[128];
+    snprintf(json, sizeof(json), "{\"device_id\":\"%s\",\"status\":\"alive\"}", g_device_id);
+    while (true) {
+        char url[512];
+        build_url(url, sizeof(url));
+        char *resp = NULL;
+        size_t resp_len = 0;
+        esp_err_t err = http_post_and_get_response(url, json, &resp, &resp_len);
+        if (err == ESP_OK)
+            printf("HTTP OK — Heartbeat from %s\n", g_device_id);
+        else
+            printf("HTTP ERR — %s\n", esp_err_to_name(err));
+        free(resp);
         vTaskDelay(pdMS_TO_TICKS(g_config.interval_s * 1000));
     }
 }
@@ -333,7 +438,19 @@ void app_main(void) {
     err = wifi_init_sta();
     if (err != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(10000)); esp_restart(); return; }
 
-    xTaskCreate(heartbeat_task, "heartbeat", 8192, NULL, 5, NULL);
+    /* Step 0: enroll with server if not already registered */
+    if (g_puf_valid && !is_enrolled()) {
+        ESP_LOGI(TAG, "Not enrolled with server. Executing Step 0...");
+        err = execute_step0();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Step 0 failed: %s. Retrying in 30s...", esp_err_to_name(err));
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            esp_restart();
+            return;
+        }
+    }
+
+    xTaskCreate(heartbeat_task, "heartbeat", 12288, NULL, 5, NULL);
     ESP_LOGI(TAG, "Operational: %s -> %s:%s%s every %ds",
              g_device_id, g_config.server_url, g_config.server_port,
              g_config.endpoint, g_config.interval_s);
