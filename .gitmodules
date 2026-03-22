@@ -6,4 +6,4 @@
 	url = https://github.com/AlejandroSava/esp32_dignal_course.git
 [submodule "server/auto-iotserver"]
 	path = server/auto-iotserver
-	url = git@github.com:agustinra24/auto-iotserver.git
+	url = https://github.com/agustinra24/auto-iotserver.git

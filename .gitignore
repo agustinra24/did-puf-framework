@@ -36,6 +36,3 @@ logs/
 *~
 .cache/
 repomix-output.md
-docs/papers/
-*.pdf
-*.pptx

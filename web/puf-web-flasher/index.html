@@ -1262,7 +1262,7 @@
           const allText = termPuf.innerText;
           const pufMatch = allText.match(/(PUF RESPONSE \([0-9]+ bytes\)[\s\S]*?)(={10,})/m);
           if (pufMatch) {
-            const hexBlock = pufMatch[1].replace(/PUF RESPONSE \([^)]+\)/,"").replace(/={3,}/g,"").trim();
+            const hexBlock = pufMatch[1].replace(/PUF RESPONSE \([^)]+\)/,"").replace(/={3,}/g,"").replace(/[IWED]\s*\(\d+\)\s*[^:]+:/g,"").trim();
             pufHex = hexBlock.replace(/[\n\r]+/g," ").replace(/\s+/g," ").trim();
           }
         }
