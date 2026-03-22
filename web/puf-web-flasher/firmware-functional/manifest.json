@@ -1,0 +1,13 @@
+{
+  "name": "Root of Trust — Firmware Funcional",
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        { "path": "bootloader.bin", "offset": 4096 },
+        { "path": "partition-table.bin", "offset": 32768 },
+        { "path": "puf_provisioning.bin", "offset": 589824 }
+      ]
+    }
+  ]
+}

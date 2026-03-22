@@ -1,0 +1,41 @@
+# ESP-IDF build artifacts
+build/
+sdkconfig.old
+sdkconfig
+
+# macOS
+.DS_Store
+._*
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Secrets and credentials
+.env
+*.pem
+*.key
+.secrets
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*~
+.cache/
+repomix-output.md
+docs/papers/
+*.pdf
+*.pptx

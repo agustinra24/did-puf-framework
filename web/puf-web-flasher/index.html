@@ -1,0 +1,1420 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Root of Trust — ESP32 SRAM-PUF Provisioning</title>
+  <!-- ── Fonts ── -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <!-- ── esp-web-tools for firmware flashing (Section 2 of each tab) ── -->
+  <script type="module" src="https://unpkg.com/esp-web-tools@10.2.1/dist/web/install-button.js?module"></script>
+  <!-- ── esptool-js for chip diagnostics (Tab 1 Section 1) ── -->
+  <script type="module">import { ESPLoader, Transport } from "https://unpkg.com/esptool-js@0.5.7/bundle.js"; window.EspLoader = ESPLoader; window.Transport = Transport;</script>
+  <style>
+    /* ════════════════════════════════════════════════════════════════
+       CSS VARIABLES — Single source of truth for theming
+       ════════════════════════════════════════════════════════════════ */
+    :root {
+      /* Background hierarchy */
+      --bg-root: #0b0b12;
+      --bg-surface: #12121c;
+      --bg-card: #181825;
+      --bg-input: #1e1e2e;
+      --bg-elevated: #22223a;
+      /* Border & dividers */
+      --border-subtle: #2a2a3e;
+      --border-focus: #4a4a6a;
+      /* Text hierarchy */
+      --text-primary: #e2e2ec;
+      --text-secondary: #9090a8;
+      --text-muted: #5c5c74;
+      /* Accent: Amber for PUF / enrollment */
+      --accent-puf: #f5a623;
+      --accent-puf-dim: rgba(245, 166, 35, 0.12);
+      --accent-puf-glow: rgba(245, 166, 35, 0.25);
+      /* Accent: Cyan for Firmware / operational */
+      --accent-fw: #22d3ee;
+      --accent-fw-dim: rgba(34, 211, 238, 0.12);
+      --accent-fw-glow: rgba(34, 211, 238, 0.25);
+      /* Semantic */
+      --success: #34d399;
+      --success-dim: rgba(52, 211, 153, 0.12);
+      --error: #f87171;
+      --error-dim: rgba(248, 113, 113, 0.12);
+      --warning: #fbbf24;
+      --warning-dim: rgba(251, 191, 36, 0.12);
+      /* Typography */
+      --font-body: 'Instrument Sans', system-ui, sans-serif;
+      --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+      /* Spacing */
+      --radius: 10px;
+      --radius-sm: 6px;
+      --transition: 0.2s ease;
+    }
+    /* ════════════════════════════════════════════════════════════════
+       RESET & BASE
+       ════════════════════════════════════════════════════════════════ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-body);
+      background: var(--bg-root);
+      color: var(--text-primary);
+      line-height: 1.6;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+    /* ════════════════════════════════════════════════════════════════
+       LAYOUT
+       ════════════════════════════════════════════════════════════════ */
+    .container {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem 4rem;
+    }
+    /* ════════════════════════════════════════════════════════════════
+       HEADER
+       ════════════════════════════════════════════════════════════════ */
+    .header {
+      text-align: center;
+      padding: 2.5rem 0 1.5rem;
+    }
+    .header__title {
+      font-size: 1.9rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, var(--accent-puf) 0%, var(--accent-fw) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .header__subtitle {
+      font-size: 0.92rem;
+      color: var(--text-secondary);
+      margin-top: 0.35rem;
+      font-weight: 400;
+    }
+    .header__chip {
+      display: inline-block;
+      margin-top: 0.75rem;
+      padding: 0.25rem 0.75rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 20px;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+    }
+    /* ════════════════════════════════════════════════════════════════
+       PREREQUISITES BANNER
+       ════════════════════════════════════════════════════════════════ */
+    .prereq {
+      background: var(--warning-dim);
+      border: 1px solid rgba(251, 191, 36, 0.25);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.75rem;
+      display: flex;
+      gap: 0.75rem;
+      align-items: flex-start;
+    }
+    .prereq__icon { font-size: 1.2rem; flex-shrink: 0; margin-top: 0.1rem; }
+    .prereq__text {
+      font-size: 0.85rem;
+      color: var(--text-primary);
+      line-height: 1.55;
+    }
+    .prereq__text strong { color: var(--warning); font-weight: 600; }
+    /* ════════════════════════════════════════════════════════════════
+       TAB NAVIGATION
+       ════════════════════════════════════════════════════════════════ */
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border-subtle);
+      margin-bottom: 1.75rem;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 0.85rem 1rem;
+      background: transparent;
+      border: none;
+      border-bottom: 2.5px solid transparent;
+      color: var(--text-muted);
+      font-family: var(--font-body);
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: var(--transition);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+    }
+    .tab-btn:hover { color: var(--text-secondary); }
+    .tab-btn.active[data-tab="puf"] {
+      color: var(--accent-puf);
+      border-bottom-color: var(--accent-puf);
+    }
+    .tab-btn.active[data-tab="firmware"] {
+      color: var(--accent-fw);
+      border-bottom-color: var(--accent-fw);
+    }
+    .tab-btn__num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.5rem;
+      height: 1.5rem;
+      border-radius: 50%;
+      font-size: 0.75rem;
+      font-weight: 700;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      transition: var(--transition);
+    }
+    .tab-btn.active[data-tab="puf"] .tab-btn__num {
+      background: var(--accent-puf-dim);
+      border-color: var(--accent-puf);
+      color: var(--accent-puf);
+    }
+    .tab-btn.active[data-tab="firmware"] .tab-btn__num {
+      background: var(--accent-fw-dim);
+      border-color: var(--accent-fw);
+      color: var(--accent-fw);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    /* ════════════════════════════════════════════════════════════════
+       CARDS (sections within each tab)
+       ════════════════════════════════════════════════════════════════ */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      margin-bottom: 1.25rem;
+    }
+    .card--puf { border-left: 3px solid var(--accent-puf); }
+    .card--fw  { border-left: 3px solid var(--accent-fw); }
+    .card__header {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      margin-bottom: 1rem;
+    }
+    .card__step {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.65rem;
+      height: 1.65rem;
+      border-radius: 50%;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .card--puf .card__step {
+      background: var(--accent-puf-dim);
+      color: var(--accent-puf);
+      border: 1px solid var(--accent-puf);
+    }
+    .card--fw .card__step {
+      background: var(--accent-fw-dim);
+      color: var(--accent-fw);
+      border: 1px solid var(--accent-fw);
+    }
+    .card__title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .card__desc {
+      font-size: 0.84rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      margin-bottom: 1rem;
+    }
+    .card__desc code {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: 3px;
+      padding: 0.1rem 0.35rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--accent-puf);
+    }
+    /* ════════════════════════════════════════════════════════════════
+       BUTTONS
+       ════════════════════════════════════════════════════════════════ */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.65rem 1.25rem;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      font-family: var(--font-body);
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: var(--transition);
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+    }
+    .btn:hover {
+      border-color: var(--border-focus);
+      background: var(--bg-input);
+    }
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .btn--puf {
+      background: var(--accent-puf-dim);
+      border-color: var(--accent-puf);
+      color: var(--accent-puf);
+    }
+    .btn--puf:hover { background: var(--accent-puf-glow); }
+    .btn--fw {
+      background: var(--accent-fw-dim);
+      border-color: var(--accent-fw);
+      color: var(--accent-fw);
+    }
+    .btn--fw:hover { background: var(--accent-fw-glow); }
+    .btn--danger {
+      background: var(--error-dim);
+      border-color: var(--error);
+      color: var(--error);
+    }
+    .btn--danger:hover { background: rgba(248, 113, 113, 0.2); }
+    /* ════════════════════════════════════════════════════════════════
+       TERMINAL / LOG OUTPUT
+       ════════════════════════════════════════════════════════════════ */
+    .terminal {
+      background: #08080e;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      line-height: 1.55;
+      color: #b0b0c8;
+      max-height: 400px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .terminal span { display: block; }
+    .terminal .log-info { color: var(--accent-fw); }
+    .terminal .log-success { color: var(--success); }
+    .terminal .log-error { color: var(--error); }
+    .terminal .log-warn { color: var(--warning); }
+    .terminal .log-puf { color: var(--accent-puf); }
+    .terminal .log-ok { color: var(--success); }
+    .terminal .log-dim { color: var(--text-muted); }
+    /* ════════════════════════════════════════════════════════════════
+       INFO BOX (chip diagnostics results)
+       ════════════════════════════════════════════════════════════════ */
+    .info-box {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 0.85rem 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+      line-height: 1.7;
+      margin-top: 0.75rem;
+    }
+    .info-box .label { color: var(--text-muted); }
+    .info-box .value { color: var(--text-primary); font-weight: 500; }
+    /* ════════════════════════════════════════════════════════════════
+       FORM INPUTS (Tab 2 configuration)
+       ════════════════════════════════════════════════════════════════ */
+    .form-group {
+      margin-bottom: 1rem;
+    }
+    .form-group label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 0.35rem;
+      letter-spacing: 0.02em;
+    }
+    .form-group input, .form-group select {
+      width: 100%;
+      padding: 0.6rem 0.85rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      transition: var(--transition);
+      outline: none;
+    }
+    .form-group input:focus, .form-group select:focus {
+      border-color: var(--accent-fw);
+      box-shadow: 0 0 0 3px var(--accent-fw-dim);
+    }
+    .form-group input::placeholder {
+      color: var(--text-muted);
+      font-style: italic;
+    }
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    .form-divider {
+      border: none;
+      border-top: 1px solid var(--border-subtle);
+      margin: 1.25rem 0;
+    }
+    .form-section-label {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 0.75rem;
+    }
+    /* ════════════════════════════════════════════════════════════════
+       ESP-WEB-TOOLS BUTTON WRAPPER
+       ════════════════════════════════════════════════════════════════ */
+    .flash-container {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-top: 0.75rem;
+    }
+    esp-web-install-button {
+      display: inline-block;
+    }
+    /* Override esp-web-tools default button style */
+    esp-web-install-button::part(button) {
+      padding: 0.65rem 1.25rem;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-body);
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    /* ════════════════════════════════════════════════════════════════
+       HAMMING DISTANCE COMPARISON (collapsible)
+       ════════════════════════════════════════════════════════════════ */
+    .collapsible-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.85rem 1.25rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      transition: var(--transition);
+      width: 100%;
+    }
+    .collapsible-header:hover { border-color: var(--border-focus); color: var(--text-primary); }
+    .collapsible-header .arrow {
+      transition: transform 0.2s;
+      font-size: 0.75rem;
+    }
+    .collapsible-header.open .arrow { transform: rotate(90deg); }
+    .collapsible-body {
+      display: none;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-top: none;
+      border-radius: 0 0 var(--radius) var(--radius);
+      padding: 1.25rem;
+    }
+    .collapsible-body.open { display: block; }
+    /* ════════════════════════════════════════════════════════════════
+       HAMMING INPUTS
+       ════════════════════════════════════════════════════════════════ */
+    .hamming-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    .hamming-grid textarea {
+      width: 100%;
+      min-height: 80px;
+      padding: 0.6rem 0.85rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      resize: vertical;
+      outline: none;
+      transition: var(--transition);
+    }
+    .hamming-grid textarea:focus {
+      border-color: var(--accent-puf);
+      box-shadow: 0 0 0 3px var(--accent-puf-dim);
+    }
+    .hamming-result {
+      padding: 0.85rem 1rem;
+      background: var(--bg-surface);
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      line-height: 1.7;
+    }
+    /* ════════════════════════════════════════════════════════════════
+       STATUS BADGE
+       ════════════════════════════════════════════════════════════════ */
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem 0.6rem;
+      border-radius: 12px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      font-family: var(--font-mono);
+    }
+    .status--ok { background: var(--success-dim); color: var(--success); }
+    .status--err { background: var(--error-dim); color: var(--error); }
+    .status--wait { background: var(--warning-dim); color: var(--warning); }
+    /* ════════════════════════════════════════════════════════════════
+       FOOTER
+       ════════════════════════════════════════════════════════════════ */
+    .footer {
+      text-align: center;
+      padding: 2rem 0 1rem;
+      border-top: 1px solid var(--border-subtle);
+      margin-top: 2rem;
+    }
+    .footer__text {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+    /* ════════════════════════════════════════════════════════════════
+       INLINE SVG ICONS
+       ════════════════════════════════════════════════════════════════ */
+    .icon {
+      display: inline-block;
+      width: 1em;
+      height: 1em;
+      vertical-align: -0.125em;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .icon--lg { width: 1.25em; height: 1.25em; }
+    .header__icon-svg {
+      width: 2.4rem;
+      height: 2.4rem;
+      margin-bottom: 0.5rem;
+      display: block;
+      margin-left: auto;
+      margin-right: auto;
+      stroke: var(--accent-puf);
+    }
+    /* ════════════════════════════════════════════════════════════════
+       RESPONSIVE
+       ════════════════════════════════════════════════════════════════ */
+    @media (max-width: 640px) {
+      .container { padding: 1rem; }
+      .header__title { font-size: 1.5rem; }
+      .form-row { grid-template-columns: 1fr; }
+      .hamming-grid { grid-template-columns: 1fr; }
+      .tab-btn { font-size: 0.8rem; padding: 0.7rem 0.5rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- ══════════════════════════════════════════════════════════════
+         HEADER
+         ══════════════════════════════════════════════════════════════ -->
+    <header class="header">
+      <svg class="header__icon-svg icon" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+      <h1 class="header__title">Root of Trust</h1>
+      <p class="header__subtitle">ESP32 SRAM-PUF Provisioning &amp; Firmware Configuration</p>
+      <span class="header__chip">ESP32-WROOM-32D &middot; ESPPufLib &middot; Web Serial API &middot; v2.0</span>
+    </header>
+    <!-- ══════════════════════════════════════════════════════════════
+         PREREQUISITES BANNER (Paso Cero)
+         ══════════════════════════════════════════════════════════════ -->
+    <div class="prereq">
+      <span class="prereq__icon"><svg class="icon icon--lg" viewBox="0 0 24 24" style="stroke:var(--warning);"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+      <div class="prereq__text">
+        <strong>Prerequisitos:</strong> Usa <strong>Google Chrome</strong> o
+        <strong>Microsoft Edge</strong> en escritorio. Conecta el ESP32 via USB.
+        Para el <strong>diagnostico</strong>, presiona BOOT al conectar si el
+        firmware esta corriendo. El flasheo con erase-first se conecta
+        automaticamente.
+      </div>
+    </div>
+    <!-- ══════════════════════════════════════════════════════════════
+         TAB NAVIGATION
+         ══════════════════════════════════════════════════════════════ -->
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="puf" onclick="switchTab('puf')">
+        <span class="tab-btn__num">1</span>
+        Aprovisionamiento PUF
+      </button>
+      <button class="tab-btn" data-tab="firmware" onclick="switchTab('firmware')">
+        <span class="tab-btn__num">2</span>
+        Firmware Funcional
+      </button>
+    </nav>
+    <!-- ██████████████████████████████████████████████████████████████
+         TAB 1: APROVISIONAMIENTO PUF
+         ██████████████████████████████████████████████████████████████ -->
+    <div id="tab-puf" class="tab-panel active">
+      <!-- ── 1.1 Chip Diagnostics ── -->
+      <div class="card card--puf">
+        <div class="card__header">
+          <span class="card__step">1</span>
+          <h2 class="card__title">Diagnostico del Chip</h2>
+        </div>
+        <p class="card__desc">
+          Conecta al ESP32 para leer su informacion de hardware: modelo, revision,
+          tamano de flash, MAC address y crystal. Esto verifica que el chip es
+          compatible con el enrollment de SRAM-PUF.
+        </p>
+        <button class="btn btn--puf" id="btnDiag" onclick="runDiagnostics()">
+          <svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Conectar y Diagnosticar
+        </button>
+        <div class="info-box" id="diagOutput" style="display:none;"></div>
+      </div>
+      <!-- ── 1.2 Flash Enrollment Firmware ── -->
+      <div class="card card--puf">
+        <div class="card__header">
+          <span class="card__step">2</span>
+          <h2 class="card__title">Instalar Firmware de Enrollment</h2>
+        </div>
+        <p class="card__desc">
+          Flashea el firmware de SRAM-PUF enrollment al ESP32. El firmware realizara
+          multiples ciclos de deep-sleep para capturar el estado de la SRAM, extraer bits
+          estables y generar el PUF Response unico del chip. Este proceso puede tomar
+          entre 1 y 6 minutos segun la cantidad de mediciones configuradas.
+        </p>
+        <div class="flash-container">
+          <!-- esp-web-tools: manifest apunta a firmware de enrollment PUF -->
+          <esp-web-install-button
+            id="pufFlashBtn"
+            manifest="firmware/manifest.json"
+            erase-first
+          ></esp-web-install-button>
+          <span style="font-size:0.78rem; color:var(--text-muted);">
+            Incluye erase-flash automatico
+          </span>
+        </div>
+      </div>
+      <!-- ── 1.3 Serial Monitor (enrollment observation) ── -->
+      <div class="card card--puf">
+        <div class="card__header">
+          <span class="card__step">3</span>
+          <h2 class="card__title">Monitor Serial — Enrollment</h2>
+        </div>
+        <p class="card__desc">
+          Observa en tiempo real los ciclos de deep-sleep y la extraccion del
+          PUF Response. Busca el mensaje <code>PROVISIONING DONE</code> seguido del
+          volcado hexadecimal del PUF Response.
+        </p>
+        <div style="display:flex; gap:0.5rem; margin-bottom:0.75rem;">
+          <button class="btn btn--puf" id="btnMonPuf" onclick="startMonitor('puf')">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg> Iniciar Monitor
+          </button>
+          <button class="btn btn--danger" id="btnStopMonPuf" onclick="stopMonitor('puf')" disabled>
+            <svg class="icon" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg> Detener
+          </button>
+          <button class="btn" onclick="termClear('termPuf')" title="Limpiar terminal" style="padding:0.65rem 0.75rem;">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/></svg>
+          </button>
+        </div>
+        <div class="terminal" id="termPuf"></div>
+      </div>
+      <!-- ── 1.4 Hamming Distance Comparison (collapsible) ── -->
+      <div style="margin-bottom:1.25rem;">
+        <button class="collapsible-header" onclick="toggleCollapsible(this)">
+          <span class="arrow">&#x25b6;</span>
+          <svg class="icon" viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Comparacion Multi-Chip (Hamming Distance)
+        </button>
+        <div class="collapsible-body" id="hammingSection">
+          <p class="card__desc">
+            Pega el PUF Response (hex) de dos chips diferentes para calcular la
+            Hamming Distance. Se espera <strong>~50%</strong> entre chips distintos
+            (independencia estadistica) y <strong>~0%</strong> para lecturas
+            repetidas del mismo chip sin re-enrollment (reproducibilidad).
+            Nota: re-enrollments del mismo chip producen respuestas diferentes
+            porque el erase-flash destruye el helper data y se seleccionan
+            nuevos bits estables.
+          </p>
+          <div class="hamming-grid">
+            <div>
+              <label style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:0.25rem; display:block;">
+                Chip A — PUF Response (hex)
+              </label>
+              <textarea id="hammingA" placeholder="4D EA 99 3F A3 E2 F9 16 ..."></textarea>
+            </div>
+            <div>
+              <label style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:0.25rem; display:block;">
+                Chip B — PUF Response (hex)
+              </label>
+              <textarea id="hammingB" placeholder="A1 03 7C D8 5E 12 B4 ..."></textarea>
+            </div>
+          </div>
+          <button class="btn btn--puf" onclick="calcHamming()">
+            Calcular Hamming Distance
+          </button>
+          <div class="hamming-result" id="hammingResult" style="margin-top:0.75rem; display:none;"></div>
+        </div>
+      </div>
+    </div>
+    <!-- end tab-puf -->
+    <!-- ██████████████████████████████████████████████████████████████
+         TAB 2: FIRMWARE FUNCIONAL
+         ██████████████████████████████████████████████████████████████ -->
+    <div id="tab-firmware" class="tab-panel">
+      <!-- ── 2.1 Server & WiFi Configuration ── -->
+      <div class="card card--fw">
+        <div class="card__header">
+          <span class="card__step">1</span>
+          <h2 class="card__title">Configuracion del Dispositivo</h2>
+        </div>
+        <p class="card__desc">
+          Define los parametros de conexion del dispositivo. Estos se enviaran al
+          ESP32 via serial despues del flasheo. El firmware los almacena en NVS
+          (Non-Volatile Storage) y los usa para conectarse al servidor IoT.
+        </p>
+        <div class="form-section-label"><svg class="icon" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg> Servidor IoT</div>
+        <div class="form-group">
+          <label for="cfgServerUrl">URL del Servidor</label>
+          <input type="text" id="cfgServerUrl" placeholder="http://192.168.1.100" value="">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="cfgServerPort">Puerto</label>
+            <input type="text" id="cfgServerPort" placeholder="8000" value="">
+          </div>
+          <div class="form-group">
+            <label for="cfgEndpoint">Endpoint de Reporte</label>
+            <input type="text" id="cfgEndpoint" placeholder="/api/v1/device/heartbeat" value="">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="cfgInterval">Intervalo de Reporte (seg)</label>
+            <input type="number" id="cfgInterval" placeholder="30" value="30" min="5" max="3600">
+          </div>
+          <div class="form-group">
+            <label for="cfgDeviceId">Device ID (opcional)</label>
+            <input type="text" id="cfgDeviceId" placeholder="Auto-detectado desde PUF" value="">
+          </div>
+        </div>
+        <hr class="form-divider">
+        <div class="form-section-label"><svg class="icon" viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0114.08 0"/><path d="M1.42 9a16 16 0 0121.16 0"/><path d="M8.53 16.11a6 6 0 016.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg> WiFi</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="cfgSsid">SSID</label>
+            <input type="text" id="cfgSsid" placeholder="MiRedWiFi" value="">
+          </div>
+          <div class="form-group">
+            <label for="cfgWifiPass">Password</label>
+            <input type="password" id="cfgWifiPass" placeholder="Contraseña WiFi" value="">
+          </div>
+        </div>
+      </div>
+      <!-- ── 2.2 Flash Functional Firmware ── -->
+      <div class="card card--fw">
+        <div class="card__header">
+          <span class="card__step">2</span>
+          <h2 class="card__title">Instalar Firmware Funcional</h2>
+        </div>
+        <p class="card__desc">
+          Flashea el firmware operativo que conecta al servidor IoT. Este firmware
+          incluye el cliente HTTP, la lectura de NVS para parametros, y el reporte
+          periodico. <strong>No borra la flash</strong> para evitar destruir
+          datos NVS existentes. El PUF Response se transfiere via serial
+          en el Paso 3.
+        </p>
+        <div class="flash-container">
+          <!-- esp-web-tools: manifest apunta a firmware funcional (SIN erase-first) -->
+          <esp-web-install-button
+            id="fwFlashBtn"
+            manifest="firmware-functional/manifest.json"
+          ></esp-web-install-button>
+          <span style="font-size:0.78rem; color:var(--text-muted);">
+            Sin erase (preserva NVS existente)
+          </span>
+        </div>
+      </div>
+      <!-- ── 2.3 Send Configuration via Serial ── -->
+      <div class="card card--fw">
+        <div class="card__header">
+          <span class="card__step">3</span>
+          <h2 class="card__title">Enviar Configuracion al Dispositivo</h2>
+        </div>
+        <p class="card__desc">
+          Envia los parametros de conexion y el <strong>PUF Response capturado
+          en la Pestaña 1</strong> al ESP32 via serial. El firmware entra en
+          modo configuracion automaticamente si detecta que no tiene parametros
+          almacenados. Protocolo: <code>CFG_START</code> → pares
+          <code>CLAVE=valor</code> + <code>PUF_RESPONSE</code> → <code>CFG_END</code>.
+        </p>
+        <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
+          <button class="btn btn--fw" id="btnSendCfg" onclick="sendConfig()">
+            <svg class="icon" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Enviar Configuracion + PUF
+          </button>
+          <span id="pufIndicator" style="font-size:0.75rem; color:var(--text-muted); font-family:var(--font-mono);" title="El PUF Response se extrae automaticamente del monitor de la Pestaña 1">PUF: —</span>
+          <span id="cfgStatus" class="status status--wait" style="display:none;"></span>
+        </div>
+        <div class="terminal" id="termCfg" style="margin-top:0.75rem; max-height:200px;"></div>
+      </div>
+      <!-- ── 2.4 Verify Connection (monitor) ── -->
+      <div class="card card--fw">
+        <div class="card__header">
+          <span class="card__step">4</span>
+          <h2 class="card__title">Verificar Conexion</h2>
+        </div>
+        <p class="card__desc">
+          Monitorea la salida serial del ESP32 para confirmar que se conecta al WiFi
+          y reporta exitosamente al servidor IoT. Busca mensajes como
+          <code>WiFi connected</code> y <code>HTTP 200</code>.
+        </p>
+        <div style="display:flex; gap:0.5rem; margin-bottom:0.75rem;">
+          <button class="btn btn--fw" id="btnMonFw" onclick="startMonitor('fw')">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg> Iniciar Monitor
+          </button>
+          <button class="btn btn--danger" id="btnStopMonFw" onclick="stopMonitor('fw')" disabled>
+            <svg class="icon" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg> Detener
+          </button>
+          <button class="btn" onclick="termClear('termFw')" title="Limpiar terminal" style="padding:0.65rem 0.75rem;">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/></svg>
+          </button>
+        </div>
+        <div class="terminal" id="termFw"></div>
+      </div>
+    </div>
+    <!-- end tab-firmware -->
+    <!-- ══════════════════════════════════════════════════════════════
+         FOOTER
+         ══════════════════════════════════════════════════════════════ -->
+    <footer class="footer">
+      <p class="footer__text">
+        Root of Trust &middot; ESP32 SRAM-PUF Decentralized Identity Framework<br>
+        Maestria en Ciencias y Tecnologias de Seguridad &middot; INAOE 2026<br>
+        <span style="color:var(--text-muted);">
+          Requiere Chrome/Edge &middot; Web Serial API &middot; USB cable
+        </span>
+      </p>
+    </footer>
+  </div>
+  <!-- end container -->
+  <!-- ══════════════════════════════════════════════════════════════════
+       JAVASCRIPT
+       ══════════════════════════════════════════════════════════════════ -->
+  <script>
+    /* ================================================================
+       GLOBALS & CONSTANTS
+       ================================================================ */
+    /** Maximum lines rendered in any terminal to prevent Chrome reflow death.
+     *  Deep-sleep cycles produce ~40 lines/cycle; cap at 2000
+     *  keeps the DOM lean and the browser responsive. */
+    const MAX_LINES = 2000;
+    /** Baud rate for all serial communications. Must match firmware config. */
+    const BAUD = 115200;
+    /** USB Vendor ID filters for Web Serial port picker.
+     *  CP210x (0x10C4), CH340 (0x1A86), FTDI (0x0403), Espressif native (0x303A). */
+    const USB_FILTERS = [
+      { usbVendorId: 0x10C4 },
+      { usbVendorId: 0x1A86 },
+      { usbVendorId: 0x0403 },
+      { usbVendorId: 0x303A }
+    ];
+    /** Monitor state for each terminal instance (puf, fw). */
+    const monitors = {
+      puf: { running: false, reader: null, port: null },
+      fw:  { running: false, reader: null, port: null }
+    };
+    /* ================================================================
+       TAB SWITCHING
+       ================================================================ */
+    /**
+     * Switch between the PUF enrollment tab and the Firmware configuration tab.
+     * Updates button active states and panel visibility.
+     * @param {string} tabId - 'puf' or 'firmware'
+     */
+    function switchTab(tabId) {
+      // Deactivate all tabs and panels
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.remove('active'));
+      // Activate the selected tab
+      document.querySelector(`.tab-btn[data-tab="${tabId}"]`).classList.add('active');
+      document.getElementById(`tab-${tabId}`).classList.add('active');
+      // Update PUF availability indicator when switching to firmware tab
+      if (tabId === 'firmware') updatePufIndicator();
+    }
+    /**
+     * Check if PUF Response data is available in Tab 1's monitor DOM.
+     * Updates the visual indicator in Tab 2 Card 2.3.
+     */
+    function updatePufIndicator() {
+      const indicator = document.getElementById('pufIndicator');
+      if (!indicator) return;
+      const termPuf = document.getElementById('termPuf');
+      let found = false;
+      if (termPuf) {
+        const allText = termPuf.innerText;
+        found = /PUF RESPONSE \([0-9]+ bytes\)/.test(allText);
+      }
+      if (found) {
+        indicator.textContent = 'PUF: ✓ Capturado';
+        indicator.style.color = 'var(--success)';
+      } else {
+        indicator.textContent = 'PUF: ✗ No disponible';
+        indicator.style.color = 'var(--error)';
+      }
+    }
+    /* ================================================================
+       COLLAPSIBLE SECTIONS
+       ================================================================ */
+    /**
+     * Toggle a collapsible section open/closed.
+     * @param {HTMLElement} header - The collapsible header button element
+     */
+    function toggleCollapsible(header) {
+      header.classList.toggle('open');
+      const body = header.nextElementSibling;
+      body.classList.toggle('open');
+    }
+    /* ================================================================
+       TERMINAL UTILITIES
+       ================================================================ */
+    /**
+     * Append a single line to a terminal element, enforcing the MAX_LINES cap.
+     * Uses removeChild pruning to keep DOM node count under control.
+     *
+     * Why this matters: deep-sleep cycles produce many lines. Without
+     * pruning, each appendChild + scrollTop forces a full reflow, and Chrome
+     * becomes unresponsive above ~10K-15K DOM nodes in a scrollable container.
+     *
+     * @param {string} termId - ID of the terminal div ('termPuf', 'termFw', 'termCfg')
+     * @param {string} text   - Line text to display
+     * @param {string} [cls]  - Optional CSS class for coloring (log-info, log-success, etc.)
+     */
+    function termLog(termId, text, cls) {
+      const el = document.getElementById(termId);
+      if (!el) return;
+      const span = document.createElement('span');
+      if (cls) span.className = cls;
+      span.textContent = text;
+      el.appendChild(span);
+      // Prune oldest lines when exceeding cap
+      while (el.childElementCount > MAX_LINES) {
+        el.removeChild(el.firstElementChild);
+      }
+      el.scrollTop = el.scrollHeight;
+    }
+    /**
+     * Clear all content from a terminal element.
+     * @param {string} termId - ID of the terminal div
+     */
+    function termClear(termId) {
+      const el = document.getElementById(termId);
+      if (el) el.innerHTML = '';
+    }
+    /* ================================================================
+       SECTION 1.1: CHIP DIAGNOSTICS (esptool-js)
+       ================================================================ */
+    /**
+     * Connect to the ESP32 via Web Serial and read chip identification data.
+     *
+     * Uses esptool-js (loaded from CDN) to enter download mode and query:
+     * chip type, revision, features, flash manufacturer/size, MAC, crystal freq.
+     *
+     * IMPORTANT: esptool-js v0.5.7 changed its API significantly:
+     *   - Constructor takes an options object: new ESPLoader({ transport, baudrate })
+     *   - Methods renamed to camelCase: main_fn→main, flash_id→flashId
+     *   - ROM methods may use camelCase: get_chip_features→getChipFeatures
+     *   - detectFlashSize() returns a string ("4MB"), not a number in KB
+     *
+     * The chip must be in download mode (hold BOOT) or have erased flash
+     * for esptool-js to sync successfully.
+     */
+    async function runDiagnostics() {
+      const btn = document.getElementById('btnDiag');
+      const out = document.getElementById('diagOutput');
+      btn.disabled = true;
+      const btnOrigHTML = btn.innerHTML;
+      btn.textContent = 'Conectando...';
+      // CDN guard: verify esptool-js loaded successfully
+      if (typeof EspLoader === 'undefined') {
+        out.style.display = 'block';
+        out.innerHTML = '<span class="value" style="color:var(--error);">Error: esptool-js no se cargo desde CDN. Verifica tu conexion a internet y recarga.</span>';
+        btn.disabled = false;
+        btn.innerHTML = btnOrigHTML;
+        return;
+      }
+      let transport = null;
+      try {
+        const port = await navigator.serial.requestPort({ filters: USB_FILTERS });
+        transport = new Transport(port);
+        /* esptool-js v0.5.7 API: constructor takes an options object,
+           NOT positional args. Passing transport as first arg causes
+           this.transport = undefined → "Cannot read getInfo" error. */
+        const loader = new EspLoader({ transport, baudrate: BAUD });
+        /* main() connects, syncs, detects chip, and uploads the flasher stub.
+           Do NOT call runStub() separately — main() handles it in v0.5.7.
+           Calling runStub() again causes "overlapping address range" error. */
+        const chipDesc = await loader.main();
+        const chip = loader.chip.CHIP_NAME || chipDesc || 'Unknown';
+        /* ROM class methods: try camelCase (v0.5.x) with snake_case fallback.
+           Return types vary across versions: may be string or array. */
+        let features = 'N/A';
+        try {
+          const getFeatures = loader.chip.getChipFeatures || loader.chip.get_chip_features;
+          if (getFeatures) {
+            const rawFeatures = await getFeatures.call(loader.chip, loader);
+            features = Array.isArray(rawFeatures) ? rawFeatures.join(', ') : String(rawFeatures);
+          }
+        } catch (_) { /* some ROM classes may not implement this */ }
+        let macStr = 'N/A';
+        try {
+          const getMac = loader.chip.readMac || loader.chip.read_mac;
+          if (getMac) {
+            const rawMac = await getMac.call(loader.chip, loader);
+            if (typeof rawMac === 'string') {
+              macStr = rawMac;
+            } else if (Array.isArray(rawMac)) {
+              macStr = rawMac.map(b => b.toString(16).padStart(2, '0')).join(':');
+            } else {
+              macStr = String(rawMac);
+            }
+          }
+        } catch (_) { /* best effort */ }
+        /* Flash size detection with multiple fallback strategies.
+           Strategy 1: detectFlashSize() (returns human-readable string "4MB")
+           Strategy 2: readFlashId() → extract size bits → lookup from DETECTED_FLASH_SIZES
+           Strategy 3: flashId() populates internal state, then retry detectFlashSize() */
+        let flashSize = 'N/A';
+        try {
+          flashSize = await loader.detectFlashSize();
+        } catch (_) {
+          try {
+            /* readFlashId() returns raw SPI register value; size is in bits 16-23 */
+            const rawId = await loader.readFlashId();
+            const sizeId = (rawId >> 16) & 0xFF;
+            const sizeMap = { 0x12:'256KB', 0x13:'512KB', 0x14:'1MB', 0x15:'2MB',
+                              0x16:'4MB', 0x17:'8MB', 0x18:'16MB' };
+            flashSize = sizeMap[sizeId] || `Unknown (0x${sizeId.toString(16)})`;
+          } catch (__) {
+            try {
+              await loader.flashId();
+              flashSize = await loader.detectFlashSize();
+            } catch (___) { /* all strategies exhausted */ }
+          }
+        }
+        let crystal = '?';
+        try {
+          const getCrystal = loader.chip.getCrystalFreq || loader.chip.get_crystal_freq;
+          if (getCrystal) {
+            crystal = await getCrystal.call(loader.chip, loader);
+          }
+        } catch (_) { /* best effort */ }
+        out.style.display = 'block';
+        out.innerHTML =
+          `<span class="label">Chip:</span> <span class="value">${chip}</span>\n` +
+          `<span class="label">Features:</span> <span class="value">${features}</span>\n` +
+          `<span class="label">Flash:</span> <span class="value">${flashSize}</span>\n` +
+          `<span class="label">Crystal:</span> <span class="value">${crystal} MHz</span>\n` +
+          `<span class="label">MAC:</span> <span class="value">${macStr}</span>`;
+      } catch (err) {
+        out.style.display = 'block';
+        /* Provide targeted advice based on error type */
+        let tip = 'Tip: Manten presionado BOOT al conectar si el firmware esta corriendo.';
+        if (err.message.includes('No port selected')) {
+          tip = 'No se selecciono ningun puerto. Conecta el ESP32 via USB y reintenta.';
+        } else if (err.message.includes('Failed to open')) {
+          tip = 'El puerto esta en uso. Cierra otras pestañas o programas que usen el puerto serial.';
+        } else if (err.message.includes('NetworkError') || err.message.includes('device has been lost')) {
+          tip = 'Dispositivo desconectado. Verifica el cable USB y reintenta.';
+        }
+        out.innerHTML = `<span class="value" style="color:var(--error);">Error: ${err.message}</span>\n` +
+          `<span class="label" style="color:var(--text-muted);">${tip}</span>`;
+      } finally {
+        if (transport) {
+          try { await transport.disconnect(); } catch (_) {
+            /* v0.5.x may use different cleanup; best effort */
+            try { await transport.clean(); } catch (__) {}
+          }
+        }
+        btn.disabled = false;
+        btn.innerHTML = btnOrigHTML;
+      }
+    }
+    /* ================================================================
+       SECTION 1.3 / 2.4: SERIAL MONITOR (shared by both tabs)
+       ================================================================ */
+    /**
+     * Start a serial monitor for a given terminal context.
+     *
+     * Uses Web Serial API directly (not esptool-js) to read raw UART output.
+     *
+     * LINE BUFFER PATTERN: Web Serial delivers arbitrary-sized chunks that are
+     * NOT aligned to line boundaries. Without buffering, text displays broken
+     * mid-word. The pattern is:
+     *   1. Accumulate incoming bytes in lineBuf
+     *   2. Split on '\n'
+     *   3. lines.pop() returns the incomplete trailing fragment (kept in lineBuf)
+     *   4. All complete lines are rendered
+     *   5. On exit, flush any remaining lineBuf content
+     *
+     * CR STRIP: ESP32 bootloader outputs \r\n; we strip \r to avoid double spacing.
+     *
+     * @param {string} ctx - 'puf' or 'fw'
+     */
+    async function startMonitor(ctx) {
+      const m = monitors[ctx];
+      if (m.running) return;
+      const termId = ctx === 'puf' ? 'termPuf' : 'termFw';
+      const btnStart = document.getElementById(ctx === 'puf' ? 'btnMonPuf' : 'btnMonFw');
+      const btnStop  = document.getElementById(ctx === 'puf' ? 'btnStopMonPuf' : 'btnStopMonFw');
+      termClear(termId);
+      termLog(termId, `[Monitor] Solicitando puerto serial...`, 'log-info');
+      try {
+        m.port = await navigator.serial.requestPort({ filters: USB_FILTERS });
+        await m.port.open({ baudRate: BAUD });
+        m.running = true;
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+        termLog(termId, `[Monitor] Conectado a ${BAUD} baud. Esperando datos...`, 'log-success');
+        const decoder = new TextDecoderStream();
+        /* Track the pipeTo promise so we can handle disconnection cleanly. */
+        let monitorPipeClosed = false;
+        const pipePromise = m.port.readable.pipeTo(decoder.writable).catch(() => {
+          monitorPipeClosed = true;
+        });
+        m.reader = decoder.readable.getReader();
+        let lineBuf = '';
+        while (m.running) {
+          let result;
+          try {
+            result = await m.reader.read();
+          } catch (readErr) {
+            /* Port disconnected or reader cancelled */
+            termLog(termId, `[Monitor] Desconectado: ${readErr.message}`, 'log-warn');
+            break;
+          }
+          if (result.done) break;
+          /* Accumulate chunk into line buffer */
+          lineBuf += result.value;
+          const lines = lineBuf.split('\n');
+          /* Last element is the incomplete trailing fragment; keep it in buffer */
+          lineBuf = lines.pop();
+          for (const rawLine of lines) {
+            /* Strip carriage return (\r) from ESP32 bootloader output */
+            const line = rawLine.replace(/\r/g, '');
+            if (line.length === 0) continue;
+            /* Color-code significant lines for visual scanning */
+            let cls = '';
+            if (line.includes('PROVISIONING DONE')) cls = 'log-success';
+            else if (line.includes('PUF RESPONSE'))   cls = 'log-puf';
+            else if (line.includes('ERROR') || line.includes('error'))   cls = 'log-error';
+            else if (line.includes('rst:0x5'))         cls = 'log-warn';
+            else if (line.includes('WiFi connected'))  cls = 'log-success';
+            else if (line.includes('HTTP 200'))         cls = 'log-success';
+            else if (line.includes('HTTP') && line.includes('ERR')) cls = 'log-error';
+            else if (line.includes('CFG_OK'))           cls = 'log-success';
+            else if (line.includes('CFG_ERR'))          cls = 'log-error';
+            else if (line.includes('NVS'))              cls = 'log-info';
+            termLog(termId, line, cls);
+          }
+        }
+        /* Flush any remaining content in the line buffer on exit */
+        if (lineBuf.length > 0) {
+          termLog(termId, lineBuf.replace(/\r/g, ''));
+        }
+        /* Clean up reader and pipe */
+        try { m.reader.cancel(); } catch (_) {}
+        if (!monitorPipeClosed) {
+          await pipePromise.catch(() => {});
+        }
+      } catch (err) {
+        termLog(termId, `[Monitor] Error: ${err.message}`, 'log-error');
+      } finally {
+        /* Always attempt to close the port */
+        if (m.port) {
+          try { await m.port.close(); } catch (_) {}
+          m.port = null;
+        }
+        m.running = false;
+        m.reader = null;
+        btnStart.disabled = false;
+        btnStop.disabled = true;
+        termLog(termId, `[Monitor] Sesion finalizada.`, 'log-info');
+      }
+    }
+    /**
+     * Signal the monitor loop to stop. The reader.read() call will throw
+     * when we cancel the reader, breaking the while loop.
+     * @param {string} ctx - 'puf' or 'fw'
+     */
+    function stopMonitor(ctx) {
+      const m = monitors[ctx];
+      m.running = false;
+      if (m.reader) {
+        try { m.reader.cancel(); } catch (_) {}
+      }
+    }
+    /* ================================================================
+       SECTION 2.3: SEND CONFIGURATION VIA SERIAL
+       ================================================================ */
+    /**
+     * Send device configuration parameters + PUF Response to the ESP32 via serial.
+     *
+     * Protocol (firmware v3 config mode):
+     *   1. Open serial at 115200 baud
+     *   2. Wait for "CFG_MODE" sentinel (firmware prints it on first boot)
+     *   3. Send "CFG_START\n"
+     *   4. Send key=value pairs, one per line
+     *   5. Send "PUF_RESPONSE=hex\n" (extracted from Tab 1 monitor DOM)
+     *   6. Send "CFG_END\n"
+     *   7. Wait for "CFG_OK" or "CFG_ERR" response
+     *
+     * The firmware enters config mode automatically on first boot when NVS
+     * has no stored parameters. After receiving CFG_END, it stores all
+     * parameters in NVS and reboots into operational mode.
+     */
+    async function sendConfig() {
+      const btn = document.getElementById('btnSendCfg');
+      const statusEl = document.getElementById('cfgStatus');
+      const termId = 'termCfg';
+      /* Collect and validate parameters */
+      const params = {
+        SERVER_URL:  document.getElementById('cfgServerUrl').value.trim(),
+        SERVER_PORT: document.getElementById('cfgServerPort').value.trim(),
+        ENDPOINT:    document.getElementById('cfgEndpoint').value.trim(),
+        INTERVAL:    document.getElementById('cfgInterval').value.trim(),
+        DEVICE_ID:   document.getElementById('cfgDeviceId').value.trim(),
+        WIFI_SSID:   document.getElementById('cfgSsid').value.trim(),
+        WIFI_PASS:   document.getElementById('cfgWifiPass').value.trim()
+      };
+      /* Minimum required fields */
+      if (!params.SERVER_URL || !params.WIFI_SSID) {
+        statusEl.style.display = 'inline-flex';
+        statusEl.className = 'status status--err';
+        statusEl.textContent = '✗ URL del servidor y SSID son obligatorios';
+        return;
+      }
+      btn.disabled = true;
+      termClear(termId);
+      termLog(termId, '[Config] Solicitando puerto serial...', 'log-info');
+      let port = null;
+      try {
+        port = await navigator.serial.requestPort({ filters: USB_FILTERS });
+        await port.open({ baudRate: BAUD });
+        const encoder = new TextEncoderStream();
+        const writerPipe = encoder.readable.pipeTo(port.writable);
+        const writer = encoder.writable.getWriter();
+        /* Also set up a reader to capture firmware responses */
+        const decoder = new TextDecoderStream();
+        const readerPipe = port.readable.pipeTo(decoder.writable).catch(() => {});
+        const reader = decoder.readable.getReader();
+        termLog(termId, '[Config] Conectado. Enviando configuracion...', 'log-info');
+        /* Small delay to let firmware settle after port open */
+        /* Wait for firmware to reach CONFIG MODE after reset */
+        termLog(termId, '[Config] Esperando CONFIG MODE...', 'log-warn');
+        let cfgReady = false;
+        let waitBuf = '';
+        const waitDeadline = Date.now() + 15000;
+        while (Date.now() < waitDeadline) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const chunk = value;
+          waitBuf += chunk;
+          const lines = waitBuf.split('\n');
+          for (const ln of lines) {
+            if (ln.includes('CFG_MODE')) { cfgReady = true; termLog(termId, '<< ' + ln.trim(), 'log-ok'); break; }
+            if (ln.trim()) termLog(termId, '<< ' + ln.trim(), 'log-dim');
+          }
+          if (cfgReady) break;
+          waitBuf = lines[lines.length - 1];
+        }
+        if (!cfgReady) { termLog(termId, '[Config] Timeout esperando CONFIG MODE', 'log-error'); port.close(); return; }
+        await new Promise(r => setTimeout(r, 300));
+        /* Send configuration protocol */
+        /* Extract PUF Response from Tab 1 monitor output */
+        let pufHex = "";
+        const termPuf = document.getElementById("termPuf");
+        if (termPuf) {
+          const allText = termPuf.innerText;
+          const pufMatch = allText.match(/(PUF RESPONSE \([0-9]+ bytes\)[\s\S]*?)(={10,})/m);
+          if (pufMatch) {
+            const hexBlock = pufMatch[1].replace(/PUF RESPONSE \([^)]+\)/,"").replace(/={3,}/g,"").trim();
+            pufHex = hexBlock.replace(/[\n\r]+/g," ").replace(/\s+/g," ").trim();
+          }
+        }
+        await writer.write("CFG_START\n");
+        termLog(termId, '>> CFG_START', 'log-info');
+        for (const [key, value] of Object.entries(params)) {
+          if (value) { /* Only send non-empty parameters */
+            const line = `${key}=${value}\n`;
+            await writer.write(line);
+            /* Mask WiFi password in terminal display */
+            const display = key === 'WIFI_PASS' ? `${key}=${'*'.repeat(value.length)}` : `${key}=${value}`;
+            termLog(termId, `>> ${display}`, 'log-info');
+          }
+        }
+        if (pufHex) { await writer.write("PUF_RESPONSE=" + pufHex + "\n"); termLog(termId, ">> PUF_RESPONSE=" + pufHex.substring(0,30) + "...", "log-info"); }
+        else { termLog(termId, "[Config] ⚠ No se encontro PUF Response en Pestaña 1. Ejecuta el enrollment primero.", "log-warn"); }
+        await writer.write("CFG_END\n");
+        termLog(termId, '>> CFG_END', 'log-info');
+        /* Wait for firmware response (timeout 5s) */
+        termLog(termId, '[Config] Esperando confirmacion del dispositivo...', 'log-warn');
+        let responseBuf = '';
+        const timeout = Date.now() + 5000;
+        let gotResponse = false;
+        while (Date.now() < timeout) {
+          const readPromise = reader.read();
+          const timeoutPromise = new Promise(r => setTimeout(() => r({ done: true, value: null }), 1000));
+          const result = await Promise.race([readPromise, timeoutPromise]);
+          if (result.done || !result.value) continue;
+          responseBuf += result.value;
+          if (responseBuf.includes('CFG_OK')) {
+            termLog(termId, '<< CFG_OK — Configuracion almacenada exitosamente', 'log-success');
+            statusEl.style.display = 'inline-flex';
+            statusEl.className = 'status status--ok';
+            statusEl.textContent = '✓ Configuracion enviada';
+            gotResponse = true;
+            break;
+          }
+          if (responseBuf.includes('CFG_ERR')) {
+            const errMsg = responseBuf.split('CFG_ERR')[1] || '';
+            termLog(termId, `<< CFG_ERR${errMsg}`, 'log-error');
+            statusEl.style.display = 'inline-flex';
+            statusEl.className = 'status status--err';
+            statusEl.textContent = '✗ Error en configuracion';
+            gotResponse = true;
+            break;
+          }
+          /* Display any intermediate firmware output */
+          const lines = responseBuf.split('\n');
+          responseBuf = lines.pop();
+          for (const line of lines) {
+            const clean = line.replace(/\r/g, '');
+            if (clean) termLog(termId, `<< ${clean}`);
+          }
+        }
+        if (!gotResponse) {
+          termLog(termId, '[Config] Timeout: sin respuesta del dispositivo. Verifica que el firmware funcional esta corriendo.', 'log-warn');
+          statusEl.style.display = 'inline-flex';
+          statusEl.className = 'status status--wait';
+          statusEl.textContent = '? Sin respuesta (timeout)';
+        }
+        /* Cleanup streams */
+        try { writer.close(); } catch (_) {}
+        try { reader.cancel(); } catch (_) {}
+        await writerPipe.catch(() => {});
+      } catch (err) {
+        termLog(termId, `[Config] Error: ${err.message}`, 'log-error');
+        statusEl.style.display = 'inline-flex';
+        statusEl.className = 'status status--err';
+        statusEl.textContent = `✗ ${err.message}`;
+      } finally {
+        if (port) {
+          try { await port.close(); } catch (_) {}
+        }
+        btn.disabled = false;
+      }
+    }
+    /* ================================================================
+       SECTION 1.4: HAMMING DISTANCE CALCULATION
+       ================================================================ */
+    /**
+     * Calculate the Hamming Distance between two hex-encoded PUF responses.
+     *
+     * Hamming Distance measures the number of bit positions where the two
+     * values differ. For two independent PUFs, expect ~50% (random).
+     * For repeated reads of the same chip (same enrollment), expect ~0%.
+     * NOTE: re-enrollments (erase + re-enroll) produce different responses
+     * because the stable-bit selection changes — do NOT expect ~0%.
+     *
+     * Accepts hex strings in various formats:
+     *   "4D EA 99 3F" (space-separated)
+     *   "4DEA993F"    (continuous)
+     *   "4d:ea:99:3f" (colon-separated)
+     */
+    function calcHamming() {
+      const resEl = document.getElementById('hammingResult');
+      resEl.style.display = 'block';
+      const parseHex = (raw) => {
+        /* Normalize: remove whitespace, colons, 0x prefixes; lowercase */
+        const clean = raw.replace(/[\s:,]/g, '').replace(/0x/gi, '').toLowerCase();
+        if (!/^[0-9a-f]+$/.test(clean)) return null;
+        const bytes = [];
+        for (let i = 0; i < clean.length; i += 2) {
+          bytes.push(parseInt(clean.substring(i, i + 2), 16));
+        }
+        return bytes;
+      };
+      const a = parseHex(document.getElementById('hammingA').value);
+      const b = parseHex(document.getElementById('hammingB').value);
+      if (!a || a.length === 0) {
+        resEl.innerHTML = '<span style="color:var(--error);">Error: Chip A no contiene hex valido.</span>';
+        return;
+      }
+      if (!b || b.length === 0) {
+        resEl.innerHTML = '<span style="color:var(--error);">Error: Chip B no contiene hex valido.</span>';
+        return;
+      }
+      /* Compare up to the length of the shorter response */
+      const len = Math.min(a.length, b.length);
+      let diffBits = 0;
+      const totalBits = len * 8;
+      for (let i = 0; i < len; i++) {
+        let xor = a[i] ^ b[i];
+        /* Popcount: count set bits in XOR result */
+        while (xor) {
+          diffBits += xor & 1;
+          xor >>= 1;
+        }
+      }
+      const pct = ((diffBits / totalBits) * 100).toFixed(2);
+      /* Determine quality interpretation */
+      let interpretation = '';
+      let color = 'var(--text-secondary)';
+      if (pct > 40 && pct < 60) {
+        interpretation = 'Rango esperado para chips diferentes (~50%)';
+        color = 'var(--success)';
+      } else if (pct < 5) {
+        interpretation = 'Respuestas muy similares: mismo chip, mismo enrollment';
+        color = 'var(--accent-puf)';
+      } else {
+        interpretation = 'Fuera del rango tipico; verificar datos';
+        color = 'var(--warning)';
+      }
+      resEl.innerHTML =
+        `<span class="label">Bytes comparados:</span> <span class="value">${len}</span> ` +
+        `(Chip A: ${a.length} B, Chip B: ${b.length} B)\n` +
+        `<span class="label">Bits diferentes:</span> <span class="value">${diffBits} / ${totalBits}</span>\n` +
+        `<span class="label">Hamming Distance:</span> <span class="value" style="color:${color}; font-size:1.05rem;">${pct}%</span>\n` +
+        `<span style="color:${color}; font-size:0.78rem;">${interpretation}</span>`;
+      if (a.length !== b.length) {
+        resEl.innerHTML += `\n<span style="color:var(--warning); font-size:0.78rem;">⚠ Las respuestas tienen diferente longitud (${a.length} vs ${b.length} bytes). Solo se compararon los primeros ${len} bytes.</span>`;
+      }
+    }
+  </script>
+</body>
+</html>
