@@ -36,6 +36,8 @@
 #include "base64.h"
 #include "http_transactions.h"
 #include "cJSON.h"
+#include "ml_dsa.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "RoT";
 #define NVS_NAMESPACE      "rot_config"
@@ -455,6 +457,134 @@ static void event_task(void *pv) {
     }
 }
 
+/* ---- ML-DSA-87 benchmark (compile with -DBENCH_MLDSA=ON) ---- */
+#ifdef BENCH_MLDSA
+#include <math.h>
+#define BENCH_N 10000
+
+typedef struct {
+    int     n;
+    double  mean;
+    double  m2;
+    int64_t min;
+    int64_t max;
+} welford_t;
+
+static void welford_init(welford_t *w) {
+    w->n = 0; w->mean = 0; w->m2 = 0; w->min = INT64_MAX; w->max = 0;
+}
+
+static void welford_update(welford_t *w, int64_t x_us) {
+    w->n++;
+    double d1 = (double)x_us - w->mean;
+    w->mean += d1 / w->n;
+    double d2 = (double)x_us - w->mean;
+    w->m2 += d1 * d2;
+    if (x_us < w->min) w->min = x_us;
+    if (x_us > w->max) w->max = x_us;
+}
+
+static double welford_std(const welford_t *w) {
+    return (w->n > 1) ? sqrt(w->m2 / w->n) : 0;
+}
+
+static void ml_dsa_benchmark(void) {
+    int cpu_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+    size_t heap_before = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+
+    ESP_LOGI(TAG, "=== ML-DSA-87 (FIPS 204) Benchmark ===");
+    ESP_LOGI(TAG, "CPU: %d MHz | N: %d | Heap: %u B free",
+             cpu_mhz, BENCH_N, (unsigned)heap_before);
+
+    uint8_t *pk  = heap_caps_malloc(ML_DSA_PK_BYTES, MALLOC_CAP_8BIT);
+    uint8_t *sk  = heap_caps_malloc(ML_DSA_SK_BYTES, MALLOC_CAP_8BIT);
+    uint8_t *sig = heap_caps_malloc(ML_DSA_SIG_BYTES, MALLOC_CAP_8BIT);
+    if (!pk || !sk || !sig) {
+        ESP_LOGE(TAG, "Heap alloc failed");
+        free(pk); free(sk); free(sig);
+        return;
+    }
+
+    const char *test_msg = "did-puf-framework:enrollment-test";
+    size_t msglen = strlen(test_msg);
+    const char *test_ctx = "enroll";
+    size_t ctxlen = strlen(test_ctx);
+    size_t siglen = 0;
+    int rc;
+    welford_t w;
+
+    /* --- Keygen: N fresh keypairs --- */
+    ESP_LOGI(TAG, "Running keygen x%d ...", BENCH_N);
+    welford_init(&w);
+    for (int i = 0; i < BENCH_N; i++) {
+        int64_t t0 = esp_timer_get_time();
+        rc = ml_dsa_keygen(pk, sk);
+        welford_update(&w, esp_timer_get_time() - t0);
+        if (rc != 0) { ESP_LOGE(TAG, "Keygen FAILED iter %d rc=%d", i, rc); goto cleanup; }
+        if ((i + 1) % 1000 == 0) {
+            ESP_LOGI(TAG, "  keygen %d/%d ...", i + 1, BENCH_N);
+            vTaskDelay(1);
+        } else if ((i + 1) % 50 == 0) {
+            vTaskDelay(1);
+        }
+    }
+    ESP_LOGI(TAG, "Keygen:  Mean=%.2f ms | Std=%.2f ms | Min=%lld ms | Max=%lld ms",
+             w.mean / 1000.0, welford_std(&w) / 1000.0, w.min / 1000, w.max / 1000);
+
+    /* --- Sign: N signatures, last keypair, fresh randomness each --- */
+    ESP_LOGI(TAG, "Running sign x%d ...", BENCH_N);
+    welford_init(&w);
+    for (int i = 0; i < BENCH_N; i++) {
+        int64_t t0 = esp_timer_get_time();
+        rc = ml_dsa_sign(sig, &siglen, (const uint8_t *)test_msg, msglen,
+                         (const uint8_t *)test_ctx, ctxlen, sk);
+        welford_update(&w, esp_timer_get_time() - t0);
+        if (rc != 0) { ESP_LOGE(TAG, "Sign FAILED iter %d rc=%d", i, rc); goto cleanup; }
+        if ((i + 1) % 1000 == 0) {
+            ESP_LOGI(TAG, "  sign %d/%d ...", i + 1, BENCH_N);
+            vTaskDelay(1);
+        } else if ((i + 1) % 50 == 0) {
+            vTaskDelay(1);
+        }
+    }
+    ESP_LOGI(TAG, "Sign:    Mean=%.2f ms | Std=%.2f ms | Min=%lld ms | Max=%lld ms",
+             w.mean / 1000.0, welford_std(&w) / 1000.0, w.min / 1000, w.max / 1000);
+
+    /* --- Verify: N verifications of last signature --- */
+    ESP_LOGI(TAG, "Running verify x%d ...", BENCH_N);
+    welford_init(&w);
+    for (int i = 0; i < BENCH_N; i++) {
+        int64_t t0 = esp_timer_get_time();
+        rc = ml_dsa_verify(sig, siglen, (const uint8_t *)test_msg, msglen,
+                           (const uint8_t *)test_ctx, ctxlen, pk);
+        welford_update(&w, esp_timer_get_time() - t0);
+        if (rc != 0) { ESP_LOGE(TAG, "Verify FAILED iter %d rc=%d", i, rc); goto cleanup; }
+        if ((i + 1) % 1000 == 0) {
+            ESP_LOGI(TAG, "  verify %d/%d ...", i + 1, BENCH_N);
+            vTaskDelay(1);
+        } else if ((i + 1) % 50 == 0) {
+            vTaskDelay(1);
+        }
+    }
+    ESP_LOGI(TAG, "Verify:  Mean=%.2f ms | Std=%.2f ms | Min=%lld ms | Max=%lld ms",
+             w.mean / 1000.0, welford_std(&w) / 1000.0, w.min / 1000, w.max / 1000);
+
+    /* Tamper test (once) */
+    rc = ml_dsa_verify(sig, siglen, (const uint8_t *)"tampered", 8,
+                       (const uint8_t *)test_ctx, ctxlen, pk);
+    ESP_LOGI(TAG, "Tamper:  %s (expected FAIL)", rc != 0 ? "FAIL" : "PASS");
+
+    ESP_LOGI(TAG, "Peak heap used: %u bytes",
+             (unsigned)(heap_before - heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)));
+    ESP_LOGI(TAG, "Key sizes: pk=%u B, sk=%u B, sig=%u B",
+             (unsigned)ML_DSA_PK_BYTES, (unsigned)ML_DSA_SK_BYTES, (unsigned)siglen);
+    ESP_LOGI(TAG, "=== ML-DSA-87 Benchmark Complete ===");
+
+cleanup:
+    free(pk); free(sk); free(sig);
+}
+#endif /* BENCH_MLDSA */
+
 void app_main(void) {
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, " ROOT OF TRUST — Firmware Funcional v4");
@@ -465,6 +595,10 @@ void app_main(void) {
         nvs_flash_erase(); err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+#ifdef BENCH_MLDSA
+    ml_dsa_benchmark();
+#endif
 
     /* Try loading PUF from NVS (survives reboots after config) */
     if (load_puf_from_nvs()) {

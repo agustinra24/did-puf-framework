@@ -173,6 +173,42 @@ uv run server.py
 
 Levanta un servidor FastAPI en `http://localhost:8000` que acepta el enrollment Step 0 y responde con una Kyber pk de prueba (bytes aleatorios). Util para desarrollo y demos sin necesidad del servidor real.
 
+### Firmas post-cuanticas (ML-DSA-87)
+
+El componente `firmware/components/ml_dsa/` integra [mldsa-native](https://github.com/pq-code-package/mldsa-native) (PQCA, Apache/ISC/MIT) como componente ESP-IDF. Implementa ML-DSA-87 (FIPS 204, NIST Level 5) con las siguientes adaptaciones para ESP32:
+
+- `MLD_CONFIG_REDUCE_RAM`: reduce el uso de RAM interna a costa de rendimiento.
+- `MLD_CONFIG_CUSTOM_ALLOC_FREE`: redirige los buffers internos grandes (~62 KB) al heap en lugar del stack (el main task tiene solo 12 KB).
+- `MLD_CONFIG_CUSTOM_RANDOMBYTES`: usa `esp_fill_random()` como fuente de entropia por hardware.
+
+**Benchmark (N=10,000, ESP32-WROOM-32D v3.1 @ 240 MHz):**
+
+| Operacion | Media | Desv. est. | Min | Max |
+|-----------|-------|------------|-----|-----|
+| Keygen | 41.09 ms | 0.15 ms | 40 ms | 42 ms |
+| Sign | 185.17 ms | 146.63 ms | 57 ms | 1,516 ms |
+| Verify | 42.00 ms | 0.01 ms | 41 ms | 42 ms |
+
+La alta varianza en signing es comportamiento esperado: FIPS 204 Algorithm 2 usa rejection sampling, donde cada intento de firma puede requerir multiples iteraciones internas. Keygen y verify son deterministicos.
+
+| Parametro | Valor |
+|-----------|-------|
+| Clave publica | 2,592 bytes |
+| Clave secreta | 4,896 bytes |
+| Firma | 4,627 bytes |
+| Heap pico (operacion) | 72 KB |
+| Flash (componente) | +19 KB |
+
+Para replicar el benchmark:
+
+```bash
+cd firmware/root_of_trust_fw
+idf.py -DBENCH_MLDSA=ON build
+idf.py -p /dev/cu.usbserial-XXXX flash monitor
+```
+
+El benchmark ejecuta 10,000 iteraciones de keygen, sign y verify con estadisticas online (algoritmo de Welford). Tarda aproximadamente 45 minutos. Los resultados se imprimen por UART a 115200 baud.
+
 ## Flujo de provisioning
 
 1. **Fase 1 (Enrollment PUF):** Se flashea `puf_provisioning`. El ESP32 reinicia multiples veces con deep sleep, capturando el patron SRAM en cada arranque. Despues de las N mediciones, genera los helper data (codigos de correccion) y almacena la respuesta PUF estable en NVS. Este proceso es destructivo: no se debe interrumpir.
@@ -202,7 +238,7 @@ El autoinstalador (`server/auto-iotserver/`) despliega todo el stack (MySQL, Mon
 | Componentes crypto compartidos (ESP-IDF) | Funcional |
 | Servidor de prueba Step 0 | Funcional |
 | Protocolo AKE Steps 1-4 (autenticacion mutua) | En desarrollo (A. Salinas) |
-| ML-DSA / Dilithium-5 (firmas post-cuanticas) | Pendiente |
+| ML-DSA-87 / Dilithium-5 (firmas post-cuanticas) | Funcional (benchmark, pendiente integracion a enrollment) |
 | CLD: journal, Merkle, no-repudio | En desarrollo |
 | OpenTimestamps (anclaje a Bitcoin) | Pendiente |
 | Rewrite de IoT API con auth PQC | Pendiente |
