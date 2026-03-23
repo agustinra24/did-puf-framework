@@ -317,53 +317,97 @@ static bool is_enrolled(void) {
 }
 
 static esp_err_t execute_step0(void) {
-    /* Base64 encode MAC and PUF hash for JSON payload */
+    esp_err_t err = ESP_FAIL;
+    char *mac_b64 = NULL, *puf_b64 = NULL, *json_str = NULL;
+    char *dsa_pk_b64 = NULL, *dsa_sig_b64 = NULL, *signed_json = NULL;
+    char *resp = NULL;
+    uint8_t *dsa_pk = NULL, *dsa_sk = NULL, *dsa_sig = NULL;
+    cJSON *root = NULL;
+
+    /* Base64 encode MAC and PUF hash */
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    char *mac_b64 = NULL, *puf_b64 = NULL;
     base64_encode_alloc(mac, 6, &mac_b64);
     base64_encode_alloc(g_puf_hash, SHA512_LEN, &puf_b64);
-    if (!mac_b64 || !puf_b64) {
-        free(mac_b64); free(puf_b64);
-        return ESP_ERR_NO_MEM;
-    }
+    if (!mac_b64 || !puf_b64) { err = ESP_ERR_NO_MEM; goto step0_cleanup; }
 
-    /* Build Step 0 JSON request */
-    cJSON *root = cJSON_CreateObject();
+    /* Generate ML-DSA-87 keypair */
+    dsa_pk = heap_caps_malloc(ML_DSA_PK_BYTES, MALLOC_CAP_8BIT);
+    dsa_sk = heap_caps_malloc(ML_DSA_SK_BYTES, MALLOC_CAP_8BIT);
+    dsa_sig = heap_caps_malloc(ML_DSA_SIG_BYTES, MALLOC_CAP_8BIT);
+    if (!dsa_pk || !dsa_sk || !dsa_sig) { err = ESP_ERR_NO_MEM; goto step0_cleanup; }
+
+    ESP_LOGI(TAG, "Generating ML-DSA-87 keypair...");
+    if (ml_dsa_keygen(dsa_pk, dsa_sk) != 0) {
+        ESP_LOGE(TAG, "ML-DSA keygen failed");
+        goto step0_cleanup;
+    }
+    ESP_LOGI(TAG, "ML-DSA-87 keypair generated (pk=%u B)", (unsigned)ML_DSA_PK_BYTES);
+
+    /* Build base enrollment JSON (Step, Device_Name, Mac_Address, PUF_Hash) */
+    root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "Step", 0);
     cJSON_AddStringToObject(root, "Device_Name", g_device_id);
     cJSON_AddStringToObject(root, "Mac_Address", mac_b64);
     cJSON_AddStringToObject(root, "PUF_Hash", puf_b64);
-    char *json_str = cJSON_PrintUnformatted(root);
+    json_str = cJSON_PrintUnformatted(root);
 
-    /* Build enrollment URL from server config */
+    /* Sign the enrollment payload: ML-DSA-87 over SHA-512(json) */
+    uint8_t digest[SHA512_LEN];
+    mbedtls_sha512((const unsigned char *)json_str, strlen(json_str), digest, 0);
+
+    size_t siglen = 0;
+    if (ml_dsa_sign(dsa_sig, &siglen, digest, SHA512_LEN,
+                    (const uint8_t *)"enroll", 6, dsa_sk) != 0) {
+        ESP_LOGE(TAG, "ML-DSA sign failed");
+        goto step0_cleanup;
+    }
+    ESP_LOGI(TAG, "Enrollment signed with ML-DSA-87 (sig=%u B)", (unsigned)siglen);
+
+    /* Add ML-DSA pk and signature to JSON */
+    base64_encode_alloc(dsa_pk, ML_DSA_PK_BYTES, &dsa_pk_b64);
+    base64_encode_alloc(dsa_sig, siglen, &dsa_sig_b64);
+    if (!dsa_pk_b64 || !dsa_sig_b64) { err = ESP_ERR_NO_MEM; goto step0_cleanup; }
+
+    cJSON_AddStringToObject(root, "MLDSA_PK", dsa_pk_b64);
+    cJSON_AddStringToObject(root, "MLDSA_Sig", dsa_sig_b64);
+    free(json_str);
+    signed_json = cJSON_PrintUnformatted(root);
+
+    /* POST signed enrollment request */
     char enroll_url[512];
     snprintf(enroll_url, sizeof(enroll_url), "%s:%s/api/v1/enroll",
              g_config.server_url, g_config.server_port);
     ESP_LOGI(TAG, "Step 0 enrollment -> %s", enroll_url);
 
-    /* POST enrollment request */
-    char *resp = NULL;
     size_t resp_len = 0;
-    esp_err_t err = http_post_and_get_response(enroll_url, json_str, &resp, &resp_len);
+    err = http_post_and_get_response(enroll_url, signed_json, &resp, &resp_len);
 
     if (err == ESP_OK && resp) {
         cJSON *rj = cJSON_Parse(resp);
         cJSON *pk_field = rj ? cJSON_GetObjectItem(rj, "kyber_pk") : NULL;
         if (pk_field && pk_field->valuestring) {
-            uint8_t *pk = NULL;
-            size_t pk_len = 0;
-            base64_decode_alloc(pk_field->valuestring, &pk, &pk_len);
-            if (pk && pk_len > 0) {
-                /* Store Kyber pk encrypted in Sec_Store partition */
+            uint8_t *kyber_pk = NULL;
+            size_t kyber_pk_len = 0;
+            base64_decode_alloc(pk_field->valuestring, &kyber_pk, &kyber_pk_len);
+            if (kyber_pk && kyber_pk_len > 0) {
+                /* Derive AES key from PUF for Sec_Store encryption */
                 uint8_t aes_key[AES_256];
                 struct puf_object puf_obj = {0};
                 derive_key_from_puf(aes_key, &puf_obj, g_puf_raw, g_puf_raw_len);
                 struct aes_256_obj aes;
                 create_aes_256_obj(&aes, aes_key);
-                write_secure_storage_region(pk, pk_len, "KyberPK", &aes);
+
+                /* Store Kyber pk encrypted */
+                write_secure_storage_region(kyber_pk, kyber_pk_len, "KyberPK", &aes);
+                ESP_LOGI(TAG, "Kyber pk stored (%d B)", (int)kyber_pk_len);
+
+                /* Store ML-DSA sk encrypted */
+                write_secure_storage_region(dsa_sk, ML_DSA_SK_BYTES, "MLDSA_SK", &aes);
+                ESP_LOGI(TAG, "ML-DSA sk stored (%d B)", (int)ML_DSA_SK_BYTES);
+
                 memset(aes_key, 0, sizeof(aes_key));
-                free(pk);
+                free(kyber_pk);
 
                 /* Mark device as enrolled */
                 nvs_handle_t h;
@@ -372,31 +416,31 @@ static esp_err_t execute_step0(void) {
                     nvs_commit(h);
                     nvs_close(h);
                 }
-                ESP_LOGI(TAG, "Step 0 complete. Kyber pk stored (%d bytes)", (int)pk_len);
+                ESP_LOGI(TAG, "Step 0 complete (Kyber pk + ML-DSA sk stored)");
             } else {
-                ESP_LOGE(TAG, "Failed to decode Kyber pk from server response");
+                ESP_LOGE(TAG, "Failed to decode Kyber pk");
                 err = ESP_FAIL;
             }
         } else {
-            ESP_LOGE(TAG, "Server response missing kyber_pk field");
+            ESP_LOGE(TAG, "Server response missing kyber_pk");
             err = ESP_FAIL;
         }
         cJSON_Delete(rj);
-        free(resp);
     } else if (err == ESP_OK) {
         ESP_LOGE(TAG, "Empty response from enrollment server");
         err = ESP_FAIL;
     }
 
+step0_cleanup:
+    if (dsa_sk) { memset(dsa_sk, 0, ML_DSA_SK_BYTES); free(dsa_sk); }
+    free(dsa_pk); free(dsa_sig);
+    free(dsa_pk_b64); free(dsa_sig_b64);
     cJSON_Delete(root);
-    free(json_str);
-    free(mac_b64);
-    free(puf_b64);
-
-    /* Clear raw PUF from memory after enrollment */
+    free(json_str); free(signed_json);
+    free(mac_b64); free(puf_b64);
+    free(resp);
     memset(g_puf_raw, 0, sizeof(g_puf_raw));
     g_puf_raw_len = 0;
-
     return err;
 }
 
@@ -600,6 +644,8 @@ void app_main(void) {
 #ifdef BENCH_MLDSA
     ml_dsa_benchmark();
 #endif
+
+
 
     /* Try loading PUF from NVS (survives reboots after config) */
     if (load_puf_from_nvs()) {

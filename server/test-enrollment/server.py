@@ -26,6 +26,8 @@ class EnrollRequest(BaseModel):
     Device_Name: str
     Mac_Address: str
     PUF_Hash: str
+    MLDSA_PK: str | None = None
+    MLDSA_Sig: str | None = None
 
 
 @app.post("/api/v1/enroll")
@@ -39,14 +41,26 @@ async def enroll(req: EnrollRequest):
     dummy_pk = os.urandom(KYBER768_PK_SIZE)
     pk_b64 = base64.b64encode(dummy_pk).decode()
 
-    devices[req.Device_Name] = {
+    device_record = {
         "mac": mac_hex,
         "puf_hash_b64": req.PUF_Hash,
         "kyber_pk_b64": pk_b64,
         "enrolled_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    print(f"[ENROLL] {req.Device_Name} (MAC: {mac_hex})")
+    if req.MLDSA_PK:
+        mldsa_pk_bytes = base64.b64decode(req.MLDSA_PK)
+        device_record["mldsa_pk_b64"] = req.MLDSA_PK
+        device_record["mldsa_pk_size"] = len(mldsa_pk_bytes)
+        if req.MLDSA_Sig:
+            mldsa_sig_bytes = base64.b64decode(req.MLDSA_Sig)
+            device_record["mldsa_sig_b64"] = req.MLDSA_Sig
+            device_record["mldsa_sig_size"] = len(mldsa_sig_bytes)
+        print(f"[ENROLL] {req.Device_Name} (MAC: {mac_hex}) with ML-DSA pk ({len(mldsa_pk_bytes)} B)")
+    else:
+        print(f"[ENROLL] {req.Device_Name} (MAC: {mac_hex})")
+
+    devices[req.Device_Name] = device_record
 
     return {
         "Step": 0,
