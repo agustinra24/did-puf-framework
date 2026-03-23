@@ -1,3 +1,18 @@
+/*
+ * Root of Trust — Firmware funcional v4
+ *
+ * Flujo de ejecucion:
+ *   1. NVS init
+ *   2. Cargar PUF de NVS (o fallback a MAC como ID)
+ *   3. Si no esta configurado -> modo UART (CFG_START/CFG_END) -> reboot
+ *   4. Cargar config de NVS (server URL, WiFi, etc.)
+ *   5. Conectar WiFi (10 reintentos, reboot si falla)
+ *   6. Si no esta enrolled -> Step 0: POST enrollment -> almacenar Kyber pk -> marcar enrolled
+ *   7. Modo operacional:
+ *      - heartbeat_task: POST periodico cada N segundos
+ *      - event_task: POST inmediato al presionar boton BOOT (GPIO0)
+ */
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -15,6 +30,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "driver/uart.h"
+#include "driver/gpio.h"
 #include "mbedtls/sha512.h"
 #include "api_secure_storage.h"
 #include "base64.h"
@@ -35,6 +51,8 @@ static const char *TAG = "RoT";
 #define DEVICE_ID_HEX_LEN 16
 #define PUF_MAX_LEN        512
 #define NVS_KEY_ENROLLED   "enrolled"
+#define EVENT_BUTTON_GPIO  GPIO_NUM_0
+#define EVENT_DEBOUNCE_MS  300
 
 typedef struct {
     char server_url[CFG_VALUE_MAX_LEN];
@@ -398,9 +416,48 @@ static void heartbeat_task(void *pv) {
     }
 }
 
+static void send_event_report(const char *trigger) {
+    char json[192];
+    snprintf(json, sizeof(json),
+             "{\"device_id\":\"%s\",\"type\":\"event\",\"trigger\":\"%s\"}",
+             g_device_id, trigger);
+    char url[512];
+    build_url(url, sizeof(url));
+    char *resp = NULL;
+    size_t resp_len = 0;
+    esp_err_t err = http_post_and_get_response(url, json, &resp, &resp_len);
+    if (err == ESP_OK)
+        printf("EVENT — %s from %s\n", trigger, g_device_id);
+    else
+        printf("EVENT ERR — %s\n", esp_err_to_name(err));
+    free(resp);
+}
+
+static void event_task(void *pv) {
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL << EVENT_BUTTON_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io);
+
+    bool last_state = true; /* pulled up = not pressed */
+    while (true) {
+        bool pressed = (gpio_get_level(EVENT_BUTTON_GPIO) == 0);
+        if (pressed && last_state) {
+            send_event_report("button");
+            vTaskDelay(pdMS_TO_TICKS(EVENT_DEBOUNCE_MS));
+        }
+        last_state = !pressed;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 void app_main(void) {
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, " ROOT OF TRUST — Firmware Funcional v3");
+    ESP_LOGI(TAG, " ROOT OF TRUST — Firmware Funcional v4");
     ESP_LOGI(TAG, "========================================");
 
     esp_err_t err = nvs_flash_init();
@@ -451,7 +508,8 @@ void app_main(void) {
     }
 
     xTaskCreate(heartbeat_task, "heartbeat", 12288, NULL, 5, NULL);
-    ESP_LOGI(TAG, "Operational: %s -> %s:%s%s every %ds",
+    xTaskCreate(event_task, "event", 8192, NULL, 5, NULL);
+    ESP_LOGI(TAG, "Operational: %s -> %s:%s%s every %ds (button on GPIO%d)",
              g_device_id, g_config.server_url, g_config.server_port,
-             g_config.endpoint, g_config.interval_s);
+             g_config.endpoint, g_config.interval_s, EVENT_BUTTON_GPIO);
 }
