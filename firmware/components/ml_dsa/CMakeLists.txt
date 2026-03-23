@@ -21,7 +21,7 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
 
 # Include paths: public for the config header, private for internal sources
 target_include_directories(${COMPONENT_LIB} PUBLIC
-    "${CMAKE_CURRENT_LIST_DIR}/src"
+    "${CMAKE_CURRENT_LIST_DIR}/config"
 )
 target_include_directories(${COMPONENT_LIB} PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/mldsa/src"

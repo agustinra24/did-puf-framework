@@ -24,7 +24,10 @@
 
 /* Redirect large internal buffers to heap instead of stack.
  * Without this, ML-DSA-87 keygen alone needs 62KB of stack,
- * but the main task only has 12KB. */
+ * but the main task only has 12KB.
+ * heap_caps_malloc provides 4-byte alignment (not 32-byte like the
+ * default aligned_alloc example). Safe because ESP32 uses only the
+ * portable scalar C backend (no SIMD alignment requirements). */
 #define MLD_CONFIG_CUSTOM_ALLOC_FREE
 #if !defined(__ASSEMBLER__)
 #include <stdlib.h>

@@ -581,6 +581,7 @@ static void ml_dsa_benchmark(void) {
     ESP_LOGI(TAG, "=== ML-DSA-87 Benchmark Complete ===");
 
 cleanup:
+    if (sk) memset(sk, 0, ML_DSA_SK_BYTES);
     free(pk); free(sk); free(sig);
 }
 #endif /* BENCH_MLDSA */
