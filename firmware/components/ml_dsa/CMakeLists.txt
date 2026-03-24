@@ -1,9 +1,10 @@
 # ML-DSA (FIPS 204) component for ESP-IDF
 #
-# Wraps mldsa-native (https://github.com/pq-code-package/mldsa-native)
-# for ESP32 targets. Uses the Single Compilation Unit (SCU) build.
+# Source: mldsa-native v1.0.0-alpha (pq-code-package/mldsa-native)
+# Portable C90 backend only (no SIMD for ESP32-Xtensa)
+# https://github.com/pq-code-package/mldsa-native
 #
-# Configuration: ML-DSA-87 (NIST Level 5) with reduced RAM.
+# Configuration: ML-DSA-87 (NIST Level 5), standard config (CBMC-verified).
 
 # The SCU file (mldsa_native.c) #includes all source files internally.
 # We only compile the SCU file itself.

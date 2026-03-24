@@ -2,15 +2,22 @@
  * Root of Trust — Firmware funcional v4
  *
  * Flujo de ejecucion:
- *   1. NVS init
- *   2. Cargar PUF de NVS (o fallback a MAC como ID)
- *   3. Si no esta configurado -> modo UART (CFG_START/CFG_END) -> reboot
- *   4. Cargar config de NVS (server URL, WiFi, etc.)
- *   5. Conectar WiFi (10 reintentos, reboot si falla)
- *   6. Si no esta enrolled -> Step 0: POST enrollment -> almacenar Kyber pk -> marcar enrolled
- *   7. Modo operacional:
- *      - heartbeat_task: POST periodico cada N segundos
- *      - event_task: POST inmediato al presionar boton BOOT (GPIO0)
+ *   1. NVS init (erase + reinit si corrupto)
+ *   2. [Solo build -DBENCH_MLDSA=ON] Benchmark ML-DSA-87 (N=10,000)
+ *   3. Cargar PUF de NVS rot_config/puf_resp (o fallback a MAC)
+ *   4. Si no esta configurado -> modo UART (CFG_START/CFG_END) -> reboot
+ *   5. Cargar config de NVS; si falla -> borrar flag configured -> restart
+ *   6. Si PUF no cargo en 3, reintentar (fue recibida via UART en 4)
+ *   7. WiFi (10 reintentos, 30s timeout; fallo -> 10s -> restart)
+ *   8. Si g_puf_valid AND NOT enrolled -> Step 0:
+ *      - ML-DSA-87 keygen + sign(SHA-512(json), ctx="enroll")
+ *      - POST enrollment con device_id, MAC, PUF hash, pk, sig
+ *      - Recibir Kyber pk (validar 1184 B), cifrar en Sec_Store
+ *      - Cifrar ML-DSA sk en Sec_Store, marcar enrolled
+ *      - Fallo -> 30s -> restart
+ *   9. Modo operacional:
+ *      - heartbeat_task (12288 stack): POST periodico cada N segundos
+ *      - event_task (8192 stack): POST al presionar GPIO0
  */
 
 #include <stdio.h>

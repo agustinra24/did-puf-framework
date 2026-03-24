@@ -30,9 +30,9 @@ La ventaja frente a credenciales en software es que la identidad PUF no se puede
 Una vez que el dispositivo tiene su identidad PUF, necesita comunicarla al servidor de forma segura y autenticada. Para esto se usa un protocolo de autenticacion mutua (AKE, Authenticated Key Exchange) basado en criptografia post-cuantica:
 
 - **ML-KEM / Kyber-768** (FIPS 203) para intercambio de claves: permite al dispositivo y al servidor derivar un secreto compartido sin transmitirlo, resistente a ataques cuanticos.
-- **ML-DSA / Dilithium-5** (FIPS 204) para firmas digitales: permite firmar registros de identidad de forma no repudiable (en desarrollo).
+- **ML-DSA / Dilithium-5** (FIPS 204) para firmas digitales: permite firmar registros de identidad de forma no repudiable (implementado en Step 0, auditado).
 
-El protocolo AKE tiene 5 fases. En el Step 0 (enrollment), el dispositivo envia su MAC address y el hash de su PUF al servidor, y recibe la clave publica Kyber del servidor que almacena cifrada localmente. Los pasos 1-4 (mutual authentication con encapsulacion Kyber, derivacion HKDF y verificacion HMAC) estan diseñados y en proceso de implementacion.
+El protocolo AKE tiene 5 fases. En el Step 0 (enrollment), el dispositivo envia su MAC address y el hash de su PUF al servidor, y recibe la clave publica Kyber del servidor que almacena cifrada localmente. Los pasos 1-4 (mutual authentication con encapsulacion Kyber, derivacion HKDF y verificacion HMAC) estan diseñados pero no implementados.
 
 El almacenamiento local de claves usa un esquema de secure storage con AES-256-CBC, HMAC-SHA512 y IV aleatorio por escritura, sobre una particion NVS (Non-Volatile Storage, el sistema key-value sobre flash del ESP32) dedicada de 1MB.
 
@@ -177,9 +177,9 @@ Levanta un servidor FastAPI en `http://localhost:8000` que acepta el enrollment 
 
 El componente `firmware/components/ml_dsa/` integra [mldsa-native](https://github.com/pq-code-package/mldsa-native) (PQCA, Apache/ISC/MIT) como componente ESP-IDF. Implementa ML-DSA-87 (FIPS 204, NIST Level 5) con las siguientes adaptaciones para ESP32:
 
-- `MLD_CONFIG_REDUCE_RAM`: reduce el uso de RAM interna a costa de rendimiento.
-- `MLD_CONFIG_CUSTOM_ALLOC_FREE`: redirige los buffers internos grandes (~62 KB) al heap en lugar del stack (el main task tiene solo 12 KB).
-- `MLD_CONFIG_CUSTOM_RANDOMBYTES`: usa `esp_fill_random()` como fuente de entropia por hardware.
+- Configuracion estandar (sin `MLD_CONFIG_REDUCE_RAM`) para mantener cobertura de pruebas formales CBMC de upstream.
+- `MLD_CONFIG_CUSTOM_ALLOC_FREE`: redirige los buffers internos (~100 KB) al heap en lugar del stack (el main task tiene solo 12 KB).
+- `MLD_CONFIG_CUSTOM_RANDOMBYTES`: usa `esp_fill_random()` como fuente de entropia por hardware (requiere WiFi activo para TRNG real).
 
 **Benchmark (N=10,000, ESP32-WROOM-32D v3.1 @ 240 MHz):**
 
@@ -196,7 +196,6 @@ La alta varianza en signing es comportamiento esperado: FIPS 204 Algorithm 2 usa
 | Clave publica | 2,592 bytes |
 | Clave secreta | 4,896 bytes |
 | Firma | 4,627 bytes |
-| Heap pico (operacion) | 72 KB |
 | Flash (componente) | +19 KB |
 
 Para replicar el benchmark:
@@ -211,18 +210,20 @@ El benchmark ejecuta 10,000 iteraciones de keygen, sign y verify con estadistica
 
 ## Flujo de provisioning
 
-1. **Fase 1 (Enrollment PUF):** Se flashea `puf_provisioning`. El ESP32 reinicia multiples veces con deep sleep, capturando el patron SRAM en cada arranque. Despues de las N mediciones, genera los helper data (codigos de correccion) y almacena la respuesta PUF estable en NVS. Este proceso es destructivo: no se debe interrumpir.
+1. **Fase 1 (Enrollment PUF):** Se flashea `puf_provisioning`. El ESP32 reinicia multiples veces con deep sleep, capturando el patron SRAM en cada arranque. Despues de las N mediciones, genera los helper data (codigos de correccion) y almacena la informacion de reconstruccion en NVS. Al terminar, imprime la respuesta PUF como hex por UART y la limpia de memoria. Este proceso es destructivo: no se debe interrumpir.
 
-2. **Fase 2 (Firmware funcional):** Se flashea `root_of_trust_fw` sin borrar la flash (la NVS con la PUF se preserva). El firmware lee la PUF de NVS, deriva el device ID (SHA-512 de la respuesta PUF), se conecta a WiFi, y ejecuta el enrollment Step 0 con el servidor. El servidor responde con su clave publica Kyber, que el dispositivo almacena cifrada en Sec_Store usando una clave AES derivada de la PUF.
+2. **Transferencia PUF:** La respuesta PUF se transfiere entre firmwares via UART, no por persistencia automatica de flash. El usuario (o el web flasher) captura el output hex de la fase 1 y lo reinyecta como `PUF_RESPONSE=4D EA 99 ...` durante el modo de configuracion de la fase 2. La tabla de particiones identica asegura que Sec_Store este alineada, pero los bytes PUF no se comparten por NVS entre los dos firmwares.
 
-3. **Operacion:** Despues del enrollment, el firmware envia heartbeats periodicos al servidor con su device ID. En reinicios posteriores, el dispositivo detecta que ya esta enrolled y salta directamente al modo operacional.
+3. **Fase 2 (Firmware funcional):** Se flashea `root_of_trust_fw` sin borrar la flash. Al primer arranque, el firmware entra en modo de configuracion UART donde recibe la PUF, credenciales WiFi y URL del servidor. Con la PUF almacenada, deriva el device ID (SHA-512), se conecta a WiFi, genera un par de claves ML-DSA-87, firma el enrollment request (SHA-512 + ML-DSA con context "enroll"), y lo envia al servidor junto con la clave publica. El servidor responde con su Kyber pk, que el dispositivo almacena cifrada en Sec_Store. La clave secreta ML-DSA tambien se almacena cifrada.
+
+4. **Operacion:** Despues del enrollment, el firmware envia heartbeats periodicos al servidor con su device ID. El boton BOOT (GPIO0) dispara reportes inmediatos. En reinicios posteriores, el dispositivo detecta que ya esta enrolled y salta directamente al modo operacional.
 
 ## Arquitectura del servidor
 
-El lado servidor se compone de dos microservicios FastAPI independientes, desplegados en Docker Compose detras de Nginx como reverse proxy:
+La arquitectura objetivo del servidor son dos microservicios FastAPI independientes, desplegados en Docker Compose detras de Nginx como reverse proxy:
 
-- **IoT API**: maneja autenticacion de dispositivos, recepcion de telemetria, gestion de usuarios y RBAC. Es la interfaz principal con los dispositivos ESP32.
-- **CLD Service**: maneja el ledger de identidades, la verificacion por Merkle tree, el protocolo de no-repudio y el anclaje a OpenTimestamps. Se comunica con el IoT API por red interna de Docker.
+- **IoT API**: autenticacion de dispositivos, telemetria, gestion de usuarios y RBAC. Interfaz principal con los ESP32. Actualmente existe como auto-iotserver v1.1 (sera reescrito).
+- **CLD Service**: ledger de identidades, verificacion por Merkle tree, protocolo de no-repudio y anclaje a OpenTimestamps. En desarrollo (actualmente solo placeholder).
 
 El autoinstalador (`server/auto-iotserver/`) despliega todo el stack (MySQL, MongoDB, Redis, FastAPI, Nginx) en un servidor Debian 13 o Raspbian 64-bit limpio. Actualmente en v1.1, sera reescrito para integrar la autenticacion post-cuantica y el CLD como segundo servicio.
 
@@ -238,7 +239,7 @@ El autoinstalador (`server/auto-iotserver/`) despliega todo el stack (MySQL, Mon
 | Componentes crypto compartidos (ESP-IDF) | Funcional |
 | Servidor de prueba Step 0 | Funcional |
 | Protocolo AKE Steps 1-4 (autenticacion mutua) | En desarrollo (A. Salinas) |
-| ML-DSA-87 / Dilithium-5 (firmas post-cuanticas) | Funcional (benchmark, pendiente integracion a enrollment) |
+| ML-DSA-87 / Dilithium-5 (firmas post-cuanticas) | Funcional (integrado en Step 0 enrollment, auditado) |
 | CLD: journal, Merkle, no-repudio | En desarrollo |
 | OpenTimestamps (anclaje a Bitcoin) | Pendiente |
 | Rewrite de IoT API con auth PQC | Pendiente |
@@ -248,14 +249,15 @@ El autoinstalador (`server/auto-iotserver/`) despliega todo el stack (MySQL, Mon
 
 - **Clonacion PUF con acceso fisico.** Si un atacante obtiene acceso fisico al dispositivo, puede extraer los helper data y la respuesta PUF de la NVS, flashear un firmware minimo con la funcion de reconstruccion PUF, y generar el mismo identificador en el mismo chip. Esto requiere posesion fisica prolongada del dispositivo. Es una limitacion inherente a las PUFs basadas en helper data y se documenta como trabajo futuro.
 - **Solo Step 0 del AKE implementado.** Los pasos 1-4 del protocolo de autenticacion mutua estan diseñados (diagramas de arquitectura) pero no codificados aun. El enrollment funciona, pero la sesion autenticada completa aun no.
-- **ML-DSA no implementado en el dispositivo.** Las firmas post-cuanticas (necesarias para el protocolo de no-repudio del CLD) aun no se ejecutan en el ESP32. El dispositivo actualmente solo usa criptografia clasica (AES, HMAC, SHA-512) mas Kyber para recepcion de claves.
+- **Asimetria de nivel de seguridad PQC.** ML-DSA-87 opera a NIST Level 5, pero Kyber-768 (recepcion de clave publica del servidor) es Level 3. La migracion a Kyber-1024 (Level 5) depende de la integracion del componente de Alejandro Salinas.
+- **Web flasher PUF extraction fragil.** El regex de extraccion de la PUF response en el web flasher matchea el output del firmware pero los datos capturados pueden contener prefijos del monitor serial (ESP_LOGI). Se agrego un regex de limpieza, pero la extraccion puede fallar dependiendo del formato exacto del output. La transferencia manual por UART es mas confiable.
 - **CLD y anclaje a blockchain pendientes.** La capa 3 esta en fase de diseño e implementacion inicial.
 
 ## Referencias
 
 - Yang, X., et al. "LedgerDB: A Centralized Ledger Database for Universal Audit and Verification." *Proceedings of the VLDB Endowment*, vol. 13, no. 12, 2020. -- Inspiracion para la arquitectura del CLD.
 - NIST FIPS 203. "Module-Lattice-Based Key-Encapsulation Mechanism Standard (ML-KEM)." 2024. -- Kyber-768 para intercambio de claves.
-- NIST FIPS 204. "Module-Lattice-Based Digital Signature Standard (ML-DSA)." 2024. -- Dilithium-5 para firmas digitales (pendiente).
+- NIST FIPS 204. "Module-Lattice-Based Digital Signature Standard (ML-DSA)." 2024. -- ML-DSA-87 para firmas digitales (implementado en ESP32 via mldsa-native).
 - Stanicek, O. "SRAM PUF for ESP32." Czech Technical University, 2022. -- Libreria PUF base del framework.
 
 ## Creditos
