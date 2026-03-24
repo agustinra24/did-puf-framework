@@ -645,8 +645,6 @@ void app_main(void) {
     ml_dsa_benchmark();
 #endif
 
-
-
     /* Try loading PUF from NVS (survives reboots after config) */
     if (load_puf_from_nvs()) {
         ESP_LOGI(TAG, "PUF identity restored from NVS");
