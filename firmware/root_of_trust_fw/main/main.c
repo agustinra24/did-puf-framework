@@ -53,6 +53,7 @@ static const char *TAG = "RoT";
 #define DEVICE_ID_HEX_LEN 16
 #define PUF_MAX_LEN        512
 #define NVS_KEY_ENROLLED   "enrolled"
+#define KYBER768_PK_SIZE   1184
 #define EVENT_BUTTON_GPIO  GPIO_NUM_0
 #define EVENT_DEBOUNCE_MS  300
 
@@ -336,6 +337,7 @@ static esp_err_t execute_step0(void) {
     dsa_sk = heap_caps_malloc(ML_DSA_SK_BYTES, MALLOC_CAP_8BIT);
     dsa_sig = heap_caps_malloc(ML_DSA_SIG_BYTES, MALLOC_CAP_8BIT);
     if (!dsa_pk || !dsa_sk || !dsa_sig) { err = ESP_ERR_NO_MEM; goto step0_cleanup; }
+    memset(dsa_sig, 0, ML_DSA_SIG_BYTES);
 
     ESP_LOGI(TAG, "Generating ML-DSA-87 keypair...");
     if (ml_dsa_keygen(dsa_pk, dsa_sk) != 0) {
@@ -362,6 +364,10 @@ static esp_err_t execute_step0(void) {
         ESP_LOGE(TAG, "ML-DSA sign failed");
         goto step0_cleanup;
     }
+    if (siglen == 0 || siglen > ML_DSA_SIG_BYTES) {
+        ESP_LOGE(TAG, "ML-DSA sign returned invalid siglen: %u", (unsigned)siglen);
+        goto step0_cleanup;
+    }
     ESP_LOGI(TAG, "Enrollment signed with ML-DSA-87 (sig=%u B)", (unsigned)siglen);
 
     /* Add ML-DSA pk and signature to JSON */
@@ -371,7 +377,7 @@ static esp_err_t execute_step0(void) {
 
     cJSON_AddStringToObject(root, "MLDSA_PK", dsa_pk_b64);
     cJSON_AddStringToObject(root, "MLDSA_Sig", dsa_sig_b64);
-    free(json_str);
+    free(json_str); json_str = NULL;
     signed_json = cJSON_PrintUnformatted(root);
 
     /* POST signed enrollment request */
@@ -390,7 +396,14 @@ static esp_err_t execute_step0(void) {
             uint8_t *kyber_pk = NULL;
             size_t kyber_pk_len = 0;
             base64_decode_alloc(pk_field->valuestring, &kyber_pk, &kyber_pk_len);
-            if (kyber_pk && kyber_pk_len > 0) {
+            if (kyber_pk && kyber_pk_len == KYBER768_PK_SIZE) {
+                if (g_puf_raw_len == 0) {
+                    ESP_LOGE(TAG, "PUF data not loaded; cannot derive storage key");
+                    free(kyber_pk);
+                    err = ESP_FAIL;
+                    cJSON_Delete(rj);
+                    goto step0_cleanup;
+                }
                 /* Derive AES key from PUF for Sec_Store encryption */
                 uint8_t aes_key[AES_256];
                 struct puf_object puf_obj = {0};
@@ -418,7 +431,8 @@ static esp_err_t execute_step0(void) {
                 }
                 ESP_LOGI(TAG, "Step 0 complete (Kyber pk + ML-DSA sk stored)");
             } else {
-                ESP_LOGE(TAG, "Failed to decode Kyber pk");
+                ESP_LOGE(TAG, "Invalid Kyber pk (got %d B, expected %d)", (int)kyber_pk_len, KYBER768_PK_SIZE);
+                free(kyber_pk);
                 err = ESP_FAIL;
             }
         } else {

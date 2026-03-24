@@ -58,6 +58,8 @@ static inline int ml_dsa_sign(uint8_t *sig, size_t *siglen,
                               const uint8_t *ctx, size_t ctxlen,
                               const uint8_t *sk)
 {
+    /* FIPS 204 Section 3.2.6: context string must be < 256 bytes */
+    if (ctxlen > 255) return -1;
     return crypto_sign_signature(sig, siglen, msg, msglen, ctx, ctxlen, sk);
 }
 
@@ -69,7 +71,7 @@ static inline int ml_dsa_sign(uint8_t *sig, size_t *siglen,
  * msg:     original message
  * msglen:  message length
  * ctx:     context string (must match what was used for signing)
- * ctxlen:  context string length
+ * ctxlen:  context string length (max 255, per FIPS 204)
  * pk:      public key (ML_DSA_PK_BYTES)
  *
  * Returns 0 if valid, negative on failure.
@@ -79,6 +81,7 @@ static inline int ml_dsa_verify(const uint8_t *sig, size_t siglen,
                                 const uint8_t *ctx, size_t ctxlen,
                                 const uint8_t *pk)
 {
+    if (ctxlen > 255) return -1;
     return crypto_sign_verify(sig, siglen, msg, msglen, ctx, ctxlen, pk);
 }
 
