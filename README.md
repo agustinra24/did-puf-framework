@@ -8,16 +8,16 @@ Proyecto de tesis de maestria en Ciencias y Tecnologias de Seguridad (INAOE, 202
 
 ## El problema
 
-La autenticacion de dispositivos IoT depende tipicamente de credenciales almacenadas en software: claves privadas, certificados, tokens. Estas credenciales tienen dos vulnerabilidades fundamentales:
+La autenticacion de dispositivos IoT depende tipicamente de hardware especializado y/o credenciales almacenadas en software: claves privadas, certificados, tokens. Estas credenciales tienen dos vulnerabilidades fundamentales:
 
 - **Son extraibles.** Un atacante con acceso fisico (o remoto, en algunos casos) puede leer la memoria del dispositivo y clonar sus credenciales. Una vez clonadas, el dispositivo falso es indistinguible del original.
 - **Son vulnerables a ataques cuanticos.** Los algoritmos de criptografia asimetrica actuales (RSA, ECDSA) seran rompibles por computadoras cuanticas suficientemente potentes. Los estandares post-cuanticos del NIST (FIPS 203, 204) ya estan publicados, pero su adopcion en IoT embebido es minima.
 
-Este framework propone una alternativa que aborda ambos problemas, organizada en tres capas.
+Este framework propone una alternativa que aborda ambos problemas, organizada en tres modulos complementarios.
 
-## Las tres capas
+## Los tres modulos
 
-### Capa 1: Identidad por hardware (SRAM-PUF)
+### Modulo 1: Identidad por hardware (SRAM-PUF)
 
 Una PUF (Physical Unclonable Function) es una "huella digital" del silicio. Cuando un chip se enciende, las celdas de SRAM se inicializan con valores aleatorios que dependen de variaciones microscopicas del proceso de fabricacion. Estos valores son unicos por chip e imposibles de replicar, ni siquiera por el fabricante.
 
@@ -25,7 +25,7 @@ El framework utiliza la SRAM del ESP32 como PUF: al encender el dispositivo, se 
 
 La ventaja frente a credenciales en software es que la identidad PUF no se puede extraer como un archivo, no se puede copiar a otro chip, y no existe en ninguna parte excepto en la fisica del dispositivo mismo.
 
-### Capa 2: Criptografia post-cuantica
+### Modulo 2: Criptografia post-cuantica
 
 Una vez que el dispositivo tiene su identidad PUF, necesita comunicarla al servidor de forma segura y autenticada. Para esto se usa un protocolo de autenticacion mutua (AKE, Authenticated Key Exchange) basado en criptografia post-cuantica:
 
@@ -36,7 +36,7 @@ El protocolo AKE tiene 5 fases. En el Step 0 (enrollment), el dispositivo envia 
 
 El almacenamiento local de claves usa un esquema de secure storage con AES-256-CBC, HMAC-SHA512 y IV aleatorio por escritura, sobre una particion NVS (Non-Volatile Storage, el sistema key-value sobre flash del ESP32) dedicada de 1MB.
 
-### Capa 3: Ledger auditable + anclaje a blockchain
+### Modulo 3: Ledger auditable + anclaje a blockchain
 
 Las identidades PUF autenticadas con criptografia post-cuantica se registran en un Centralized Ledger Database (CLD) diseñado especificamente para este framework. El CLD no es un blockchain: es una base de datos centralizada con propiedades criptograficas que la hacen verificable y a prueba de manipulacion. Inspirado en LedgerDB (Yang et al., PVLDB 2020).
 
@@ -251,7 +251,7 @@ El autoinstalador (`server/auto-iotserver/`) despliega todo el stack (MySQL, Mon
 - **Solo Step 0 del AKE implementado.** Los pasos 1-4 del protocolo de autenticacion mutua estan diseñados (diagramas de arquitectura) pero no codificados aun. El enrollment funciona, pero la sesion autenticada completa aun no.
 - **Asimetria de nivel de seguridad PQC.** ML-DSA-87 opera a NIST Level 5, pero Kyber-768 (recepcion de clave publica del servidor) es Level 3. La migracion a Kyber-1024 (Level 5) depende de la integracion del componente de Alejandro Salinas.
 - **Web flasher PUF extraction fragil.** El regex de extraccion de la PUF response en el web flasher matchea el output del firmware pero los datos capturados pueden contener prefijos del monitor serial (ESP_LOGI). Se agrego un regex de limpieza, pero la extraccion puede fallar dependiendo del formato exacto del output. La transferencia manual por UART es mas confiable.
-- **CLD y anclaje a blockchain pendientes.** La capa 3 esta en fase de diseño e implementacion inicial.
+- **CLD y anclaje a blockchain pendientes.** El modulo 3 esta en fase de diseño e implementacion inicial.
 
 ## Referencias
 
