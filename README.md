@@ -104,7 +104,7 @@ did-puf-framework/
 
 **`server/auto-iotserver/`** es el backend IoT actual (v1.1): una API FastAPI con autenticacion, telemetria y un autoinstalador de 14 fases para Debian. Esta programado para ser reescrito desde cero incorporando autenticacion post-cuantica.
 
-**`firmware/components/ml_dsa/`** es el [port de mldsa-native a ESP32](https://github.com/agustinra24/mldsa-native-esp32) (submodulo). Primer port documentado de mldsa-native al ESP32. Provee firmas digitales ML-DSA-87 (FIPS 204, NIST Level 5) como componente ESP-IDF standalone.
+**`firmware/components/ml_dsa/`** es el [port de mldsa-native a ESP32](https://github.com/agustinra24/mldsa-native-esp32) (submodulo). Primer port documentado de la libreria mldsa-native (PQCA) al ESP32. Provee firmas digitales ML-DSA-87 (FIPS 204, NIST Level 5) como componente ESP-IDF standalone.
 
 **`reference/esp32_dignal_course/`** es el repositorio de Alejandro Salinas (colaborador), incluido como submodulo de referencia. Contiene el diseño del protocolo AKE, la implementacion de Kyber-768 para ESP32, y los componentes de secure storage que fueron extraidos y adaptados como componentes compartidos en `firmware/components/`.
 
@@ -270,4 +270,4 @@ El autoinstalador (`server/auto-iotserver/`) despliega todo el stack (MySQL, Mon
 
 ## Licencia
 
-[MIT](LICENSE)
+[MIT](LICENSE). Los submodulos tienen sus propias licencias: `esp32_puflib` (MIT), `ml_dsa` (Apache-2.0), `auto-iotserver` (MIT).
