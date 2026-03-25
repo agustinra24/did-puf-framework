@@ -84,6 +84,7 @@ did-puf-framework/
 │   ├── root_of_trust_fw/          # Firmware funcional con enrollment Step 0 (fase 2)
 │   └── components/
 │       ├── esp32_puflib/          # Libreria SRAM-PUF (submodulo, fork propio)
+│       ├── ml_dsa/                # ML-DSA-87 FIPS 204 (submodulo, port propio)
 │       ├── crypto_storage/        # Secure storage (AES-256-CBC + HMAC-SHA512)
 │       ├── crypto_utils/          # Utilidades de codificacion (base64)
 │       └── http_helpers/          # Helpers para transacciones HTTP
@@ -102,6 +103,8 @@ did-puf-framework/
 **`web/puf-web-flasher/`** es una aplicacion HTML que corre en Chrome y permite hacer todo el proceso de provisioning desde el navegador: diagnostico del chip, flasheo de ambos firmwares, y configuracion del dispositivo via Web Serial API. No requiere instalar ESP-IDF; util para demos y para provisionar dispositivos sin entorno de desarrollo.
 
 **`server/auto-iotserver/`** es el backend IoT actual (v1.1): una API FastAPI con autenticacion, telemetria y un autoinstalador de 14 fases para Debian. Esta programado para ser reescrito desde cero incorporando autenticacion post-cuantica.
+
+**`firmware/components/ml_dsa/`** es el [port de mldsa-native a ESP32](https://github.com/agustinra24/mldsa-native-esp32) (submodulo). Primer port documentado de mldsa-native al ESP32. Provee firmas digitales ML-DSA-87 (FIPS 204, NIST Level 5) como componente ESP-IDF standalone.
 
 **`reference/esp32_dignal_course/`** es el repositorio de Alejandro Salinas (colaborador), incluido como submodulo de referencia. Contiene el diseño del protocolo AKE, la implementacion de Kyber-768 para ESP32, y los componentes de secure storage que fueron extraidos y adaptados como componentes compartidos en `firmware/components/`.
 
@@ -175,7 +178,7 @@ Levanta un servidor FastAPI en `http://localhost:8000` que acepta el enrollment 
 
 ### Firmas post-cuanticas (ML-DSA-87)
 
-El componente `firmware/components/ml_dsa/` integra [mldsa-native](https://github.com/pq-code-package/mldsa-native) (PQCA, Apache/ISC/MIT) como componente ESP-IDF. Implementa ML-DSA-87 (FIPS 204, NIST Level 5) con las siguientes adaptaciones para ESP32:
+El componente `firmware/components/ml_dsa/` ([repo independiente](https://github.com/agustinra24/mldsa-native-esp32), incluido como submodulo) integra [mldsa-native](https://github.com/pq-code-package/mldsa-native) (PQCA, Apache/ISC/MIT) como componente ESP-IDF. Implementa ML-DSA-87 (FIPS 204, NIST Level 5) con las siguientes adaptaciones para ESP32:
 
 - Configuracion estandar (sin `MLD_CONFIG_REDUCE_RAM`) para mantener cobertura de pruebas formales CBMC de upstream.
 - `MLD_CONFIG_CUSTOM_ALLOC_FREE`: redirige los buffers internos (~100 KB) al heap en lugar del stack (el main task tiene solo 12 KB).

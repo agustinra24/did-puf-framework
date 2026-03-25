@@ -7,3 +7,6 @@
 [submodule "server/auto-iotserver"]
 	path = server/auto-iotserver
 	url = https://github.com/agustinra24/auto-iotserver.git
+[submodule "firmware/components/ml_dsa"]
+	path = firmware/components/ml_dsa
+	url = https://github.com/agustinra24/mldsa-native-esp32.git
