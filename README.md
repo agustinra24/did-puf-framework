@@ -90,23 +90,21 @@ did-puf-framework/
 │       └── http_helpers/          # Helpers para transacciones HTTP
 ├── web/
 │   └── puf-web-flasher/          # Herramienta web de provisioning (Chrome, Web Serial)
-├── server/
-│   ├── auto-iotserver/            # API IoT + autoinstalador Debian (submodulo)
-│   ├── cld-service/               # Servicio CLD (en desarrollo)
-│   └── test-enrollment/           # Servidor de prueba para Step 0 (FastAPI)
-└── reference/
-    └── esp32_dignal_course/       # Protocolo AKE de referencia (submodulo, A. Salinas)
+└── server/
+    ├── auto-iotserver/            # Plataforma IoT legacy completa (submodulo)
+    ├── cld-service/               # Servicio CLD (en desarrollo)
+    └── test-enrollment/           # Servidor de prueba para Step 0 (FastAPI)
 ```
 
 ### Sobre los directorios
 
 **`web/puf-web-flasher/`** es una aplicacion HTML que corre en Chrome y permite hacer todo el proceso de provisioning desde el navegador: diagnostico del chip, flasheo de ambos firmwares, y configuracion del dispositivo via Web Serial API. No requiere instalar ESP-IDF; util para demos y para provisionar dispositivos sin entorno de desarrollo.
 
-**`server/auto-iotserver/`** es el backend IoT actual (v1.1): una API FastAPI con autenticacion, telemetria y un autoinstalador de 14 fases para Debian. Esta programado para ser reescrito desde cero incorporando autenticacion post-cuantica.
+**`server/auto-iotserver/`** es la plataforma IoT legacy completa (v1.1): incluye un autoinstalador de 14 fases para Debian, la API FastAPI con autenticacion y telemetria, y el firmware MicroPython del dispositivo (referencia historica, previo a la migracion a C/ESP-IDF). Esta programado para ser reescrito incorporando autenticacion post-cuantica.
 
 **`firmware/components/ml_dsa/`** es el [port de mldsa-native a ESP32](https://github.com/agustinra24/mldsa-native-esp32) (submodulo). Primer port documentado de la libreria mldsa-native (PQCA) al ESP32. Provee firmas digitales ML-DSA-87 (FIPS 204, NIST Level 5) como componente ESP-IDF standalone.
 
-**`reference/esp32_dignal_course/`** es el repositorio de Alejandro Salinas (colaborador), incluido como submodulo de referencia. Contiene el diseño del protocolo AKE, la implementacion de Kyber-768 para ESP32, y los componentes de secure storage que fueron extraidos y adaptados como componentes compartidos en `firmware/components/`.
+El diseño del protocolo AKE, la implementacion de Kyber-768 para ESP32 y los componentes de secure storage que fueron extraidos y adaptados como componentes compartidos en `firmware/components/` se basan en el trabajo de Alejandro Salinas (colaborador). Su repositorio de referencia esta disponible en [github.com/AlejandroSava/esp32_dignal_course](https://github.com/AlejandroSava/esp32_dignal_course).
 
 ## Configuracion del dispositivo
 
@@ -238,7 +236,7 @@ El autoinstalador (`server/auto-iotserver/`) despliega todo el stack (MySQL, Mon
 |---|---|
 | SRAM-PUF enrollment | Funcional |
 | Firmware root of trust + Step 0 | Funcional |
-| Web flasher (provisioning via Chrome) | Funcional |
+| Web flasher (provisioning via Chrome) | Beta (funcional, con mejoras pendientes) |
 | Componentes crypto compartidos (ESP-IDF) | Funcional |
 | Servidor de prueba Step 0 | Funcional |
 | Protocolo AKE Steps 1-4 (autenticacion mutua) | En desarrollo (A. Salinas) |
@@ -262,10 +260,11 @@ El autoinstalador (`server/auto-iotserver/`) despliega todo el stack (MySQL, Mon
 - NIST FIPS 203. "Module-Lattice-Based Key-Encapsulation Mechanism Standard (ML-KEM)." 2024. -- Kyber-768 para intercambio de claves.
 - NIST FIPS 204. "Module-Lattice-Based Digital Signature Standard (ML-DSA)." 2024. -- ML-DSA-87 para firmas digitales (implementado en ESP32 via mldsa-native).
 - Stanicek, O. "SRAM PUF for ESP32." Czech Technical University, 2022. -- Libreria PUF base del framework.
+- Salinas, A. "esp32_dignal_course." [github.com/AlejandroSava/esp32_dignal_course](https://github.com/AlejandroSava/esp32_dignal_course) -- Protocolo AKE de referencia, Kyber-768 KEM para ESP32, componentes de secure storage.
 
 ## Creditos
 
-- **Alejandro Salinas** -- Diseño del protocolo AKE (5 fases), componentes criptograficos (secure storage, Kyber-768 KEM en ESP32), implementacion de referencia.
+- **Alejandro Salinas** ([esp32_dignal_course](https://github.com/AlejandroSava/esp32_dignal_course)) -- Diseño del protocolo AKE (5 fases), componentes criptograficos (secure storage, Kyber-768 KEM en ESP32), implementacion de referencia.
 - **Ondrej Stanicek** (Czech Technical University) -- Libreria SRAM-PUF original para ESP32.
 
 ## Licencia

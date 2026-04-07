@@ -1,9 +1,6 @@
 [submodule "firmware/components/esp32_puflib"]
 	path = firmware/components/esp32_puflib
 	url = https://github.com/agustinra24/esp32_puflib.git
-[submodule "reference/esp32_dignal_course"]
-	path = reference/esp32_dignal_course
-	url = https://github.com/AlejandroSava/esp32_dignal_course.git
 [submodule "server/auto-iotserver"]
 	path = server/auto-iotserver
 	url = https://github.com/agustinra24/auto-iotserver.git
