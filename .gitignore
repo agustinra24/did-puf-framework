@@ -2,6 +2,7 @@
 build/
 sdkconfig.old
 sdkconfig
+dependencies.lock
 
 # macOS
 .DS_Store

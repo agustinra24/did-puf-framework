@@ -20,7 +20,8 @@
 
 #define TAG "PUF_PROV"
 
-/* Counter en RTC memory que sobrevive deep sleep */
+/* Solo diagnóstico: se incrementa en cada despertar desde deep sleep durante
+ * el enrollment. El estado oficial del PUF vive en NVS/puflib, no aquí. */
 RTC_DATA_ATTR volatile uint32_t puf_wake_stub_hits = 0;
 
 /*
@@ -31,6 +32,8 @@ static bool is_enrollment_done(void)
 {
     /* Inicializar NVS default (no la particion Sec_Store) */
     esp_err_t err = nvs_flash_init();
+    /* NVS llena o formato incompatible: borrar e init borran claves (p. ej.
+     * enrolled); el próximo arranque volverá a hacer enrollment. */
     if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
         err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
@@ -81,20 +84,23 @@ void app_main(void)
         ESP_LOGI(TAG, "Enrollment previo detectado, saltando enrollment.");
     }
 
+    /* Con enrolled=1 no se vuelve a llamar enroll_puf(); aun así hay que
+     * reconstruir la respuesta estable desde helper data en NVS. */
     /*
-     * Obtener PUF response. Si no esta lista, puflib necesita
-     * un deep sleep mas para capturar la SRAM via wake stub.
+     * Si la respuesta aún no está en RAM (PUF_STATE != RESPONSE_READY),
+     * get_puf_response() intenta obtenerla o indica que falta otro ciclo.
+     * Si falla, get_puf_response_reset() reinicia el chip; no hay retorno aquí.
      */
     if (PUF_STATE != RESPONSE_READY) {
         bool puf_ok = get_puf_response();
         if (!puf_ok) {
             ESP_LOGW(TAG, "PUF no lista, reiniciando para captura SRAM...");
             get_puf_response_reset();
-            /* No se ejecuta nada despues de esta linea */
         }
     }
 
     ESP_LOGI(TAG, "=== PUF RESPONSE (%d bytes) ===", PUF_RESPONSE_LEN);
+    /* Volcado hex por UART para captura manual o herramientas (p. ej. fase 2). */
     if (PUF_RESPONSE_LEN > 0) {
         for (size_t i = 0; i < PUF_RESPONSE_LEN; ++i) {
             printf("%02X ", PUF_RESPONSE[i]);
@@ -108,11 +114,16 @@ void app_main(void)
     }
     ESP_LOGI(TAG, "================================");
 
+    /* Libera estado temporal de la respuesta en RAM (puflib); no borra NVS ni el enrollment. */
     clean_puf_response();
     ESP_LOGI(TAG, "Provisioning completo.");
 }
 
-/* Wake stub: captura SRAM antes del bootloader */
+/*
+ * Wake stub en RTC IRAM: se ejecuta al salir de deep sleep, antes del arranque
+ * normal de la app. Primero esp_default_wake_deep_sleep(); luego
+ * puflib_wake_up_stub() para que puflib muestree la SRAM en cada ciclo del enrollment.
+ */
 void __attribute__((used)) RTC_IRAM_ATTR esp_wake_deep_sleep(void)
 {
     puf_wake_stub_hits++;

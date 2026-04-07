@@ -47,6 +47,8 @@
 #include "esp_heap_caps.h"
 
 static const char *TAG = "RoT";
+
+/* NVS rot_config keys, UART provisioning limits, WiFi STA bits/retries, PQC sizes, GPIO event. */
 #define NVS_NAMESPACE      "rot_config"
 #define NVS_KEY_CONFIGURED "configured"
 #define CFG_VALUE_MAX_LEN  256
@@ -73,6 +75,10 @@ typedef struct {
     int  interval_s;
 } rot_config_t;
 
+/*
+ * g_config: loaded after UART provisioning. g_device_id + g_puf_*: RoT identity when PUF is valid;
+ * otherwise g_device_id may be a MAC-based placeholder until PUF arrives. s_wifi_*: connect handshake.
+ */
 static rot_config_t g_config = {0};
 static char g_device_id[DEVICE_ID_HEX_LEN + 1] = {0};
 static uint8_t g_puf_hash[SHA512_LEN] = {0};
@@ -82,7 +88,9 @@ static size_t  g_puf_raw_len = 0;
 static EventGroupHandle_t s_wifi_event_group = NULL;
 static int s_wifi_retry_count = 0;
 
-/* Parse hex string "4D F2 DD ..." into bytes. Returns count. */
+/* ---------- NVS rot_config: PUF blob, flags, strings ---------- */
+
+/* Hex string "4D F2 DD ..." (spaces/newlines allowed). Returns number of bytes written. */
 static int parse_hex_string(const char *hex, uint8_t *out, int max_len) {
     int count = 0;
     const char *p = hex;
@@ -104,6 +112,7 @@ static int parse_hex_string(const char *hex, uint8_t *out, int max_len) {
     return count;
 }
 
+/* SHA-512(PUF) -> g_puf_hash; first 8 bytes -> 16-char hex g_device_id. Sets g_puf_valid. */
 static void derive_identity(const uint8_t *puf_data, int puf_len) {
     mbedtls_sha512_context ctx;
     mbedtls_sha512_init(&ctx);
@@ -161,6 +170,7 @@ static esp_err_t nvs_read_str(const char *key, char *buf, size_t buflen) {
     return err;
 }
 
+/* Fills g_config from NVS; interval < 5 s is clamped to DEFAULT_INTERVAL_S. */
 static esp_err_t config_load_from_nvs(void) {
     esp_err_t err;
     err = nvs_read_str("srv_url", g_config.server_url, sizeof(g_config.server_url));
@@ -179,6 +189,9 @@ static esp_err_t config_load_from_nvs(void) {
     return ESP_OK;
 }
 
+/* ---------- UART: CFG_START ... CFG_END provisioning ---------- */
+
+/* Reads until newline or buflen-1; returns early if no input before deadline (timeout_ms total). */
 static int uart_read_line(char *buf, size_t buflen, int timeout_ms) {
     int idx = 0;
     int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
@@ -192,6 +205,7 @@ static int uart_read_line(char *buf, size_t buflen, int timeout_ms) {
     return idx;
 }
 
+/* One CFG line KEY=value: UART names map to shorter NVS string keys (except PUF_RESPONSE -> blob). */
 static esp_err_t config_process_line(const char *line) {
     const char *eq = strchr(line, '=');
     if (!eq || eq == line) return ESP_ERR_INVALID_ARG;
@@ -241,6 +255,10 @@ static void uart_init(void) {
     uart_param_config(CFG_UART_PORT, &uart_config);
 }
 
+/*
+ * Blocks forever: wait for CFG_START, accept lines until CFG_END (30 s idle -> timeout).
+ * Requires at least one successfully parsed param; then sets NVS configured=1, CFG_OK, reboot.
+ */
 static void config_mode(void) {
     const char *id = g_puf_valid ? g_device_id : "unconfigured";
     ESP_LOGW(TAG, "========================================");
@@ -274,12 +292,16 @@ static void config_mode(void) {
     }
 }
 
+/* ---------- WiFi STA ---------- */
+
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
-    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) esp_wifi_connect();
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) esp_wifi_connect(); /* initial association */
     else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        /* Retry connect up to WIFI_MAX_RETRIES; then signal permanent failure. */
         if (s_wifi_retry_count < WIFI_MAX_RETRIES) { esp_wifi_connect(); s_wifi_retry_count++; }
         else xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        /* Got DHCP IP: reset retry counter and unblock wifi_init_sta wait. */
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "WiFi connected — IP: " IPSTR, IP2STR(&ev->ip_info.ip));
         printf("WiFi connected\n");
@@ -288,6 +310,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     }
 }
 
+/* Init STA, start connect, wait up to 30 s for IP or fail bit -> ESP_OK / ESP_FAIL. */
 static esp_err_t wifi_init_sta(void) {
     s_wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
@@ -309,12 +332,16 @@ static esp_err_t wifi_init_sta(void) {
     return (bits & WIFI_CONNECTED_BIT) ? ESP_OK : ESP_FAIL;
 }
 
+/* ---------- HTTP target URL and Step 0 enrollment ---------- */
+
+/* Omit :port when empty or default 80/443 so URL matches typical browser-style origins. */
 static void build_url(char *buf, size_t sz) {
     bool wp = (g_config.server_port[0] && strcmp(g_config.server_port,"80") && strcmp(g_config.server_port,"443"));
     if (wp) snprintf(buf, sz, "%s:%s%s", g_config.server_url, g_config.server_port, g_config.endpoint);
     else snprintf(buf, sz, "%s%s", g_config.server_url, g_config.endpoint);
 }
 
+/* Server registration complete (separate from UART "configured" flag). */
 static bool is_enrolled(void) {
     nvs_handle_t h;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
@@ -324,6 +351,10 @@ static bool is_enrolled(void) {
     return (err == ESP_OK && val == 1);
 }
 
+/*
+ * Step 0: POST signed enrollment; on success store Kyber pk and ML-DSA sk in Sec_Store.
+ * Single exit via step0_cleanup: zero sk, free heap, wipe g_puf_raw after key derivation.
+ */
 static esp_err_t execute_step0(void) {
     esp_err_t err = ESP_FAIL;
     char *mac_b64 = NULL, *puf_b64 = NULL, *json_str = NULL;
@@ -460,11 +491,15 @@ step0_cleanup:
     free(json_str); free(signed_json);
     free(mac_b64); free(puf_b64);
     free(resp);
+    /* Reduce PUF exposure in RAM once AES key was derived (or path failed after use). */
     memset(g_puf_raw, 0, sizeof(g_puf_raw));
     g_puf_raw_len = 0;
     return err;
 }
 
+/* ---------- Operational FreeRTOS tasks ---------- */
+
+/* Periodic POST to server_url:port/endpoint at g_config.interval_s. */
 static void heartbeat_task(void *pv) {
     char json[128];
     snprintf(json, sizeof(json), "{\"device_id\":\"%s\",\"status\":\"alive\"}", g_device_id);
@@ -500,6 +535,7 @@ static void send_event_report(const char *trigger) {
     free(resp);
 }
 
+/* Poll GPIO0: detect press (active low vs pull-up); debounce after reporting. */
 static void event_task(void *pv) {
     gpio_config_t io = {
         .pin_bit_mask = (1ULL << EVENT_BUTTON_GPIO),
@@ -656,6 +692,7 @@ void app_main(void) {
     ESP_LOGI(TAG, " ROOT OF TRUST — Firmware Funcional v4");
     ESP_LOGI(TAG, "========================================");
 
+    /* Recover NVS or erase+reinit if layout/version blocks startup. */
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase(); err = nvs_flash_init();
@@ -666,7 +703,7 @@ void app_main(void) {
     ml_dsa_benchmark();
 #endif
 
-    /* Try loading PUF from NVS (survives reboots after config) */
+    /* Prefer PUF-backed identity from NVS; otherwise provisional MAC-based id until provisioning. */
     if (load_puf_from_nvs()) {
         ESP_LOGI(TAG, "PUF identity restored from NVS");
     } else {
@@ -678,8 +715,10 @@ void app_main(void) {
         ESP_LOGW(TAG, "No PUF data. Using MAC ID: %s", g_device_id);
     }
 
+    /* First boot or wiped config: UART only until CFG_OK commits rot_config. */
     if (!nvs_is_configured()) { uart_init(); config_mode(); return; }
 
+    /* Missing/corrupt keys: drop configured flag and restart into provisioning path. */
     err = config_load_from_nvs();
     if (err != ESP_OK) {
         nvs_handle_t h;
@@ -689,13 +728,14 @@ void app_main(void) {
         esp_restart(); return;
     }
 
-    /* Reload PUF identity after config (it was stored during config_mode) */
+    /* PUF may have been supplied only inside the UART block above. */
     if (!g_puf_valid) load_puf_from_nvs();
 
+    /* No IP after retries: backoff then full restart. */
     err = wifi_init_sta();
     if (err != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(10000)); esp_restart(); return; }
 
-    /* Step 0: enroll with server if not already registered */
+    /* One-time server enrollment when RoT is PUF-based and NVS enrolled flag is clear. */
     if (g_puf_valid && !is_enrolled()) {
         ESP_LOGI(TAG, "Not enrolled with server. Executing Step 0...");
         err = execute_step0();
@@ -707,6 +747,7 @@ void app_main(void) {
         }
     }
 
+    /* Steady state: background heartbeat and optional GPIO event POSTs. */
     xTaskCreate(heartbeat_task, "heartbeat", 12288, NULL, 5, NULL);
     xTaskCreate(event_task, "event", 8192, NULL, 5, NULL);
     ESP_LOGI(TAG, "Operational: %s -> %s:%s%s every %ds (button on GPIO%d)",
