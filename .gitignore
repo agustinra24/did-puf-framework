@@ -1,10 +1,11 @@
 # ESP-IDF build artifacts
 build/
-sdkconfig.old
 sdkconfig
+sdkconfig.old
 dependencies.lock
+.cache/
 
-# macOS
+# OS
 .DS_Store
 ._*
 
@@ -27,15 +28,16 @@ venv/
 *.key
 .secrets
 
-# Logs
+# Runtime logs
 logs/
 *.log
 
-# Temporary files
+# Editor temporaries
 *.tmp
 *.swp
 *~
-.cache/
-repomix-output.md
+
+# AI/tool session artifacts (safety net; these should be created in ~/esp/, not here)
 CP-*.md
 guia-estudio-*.md
+repomix-output.md
